@@ -23,7 +23,18 @@ import { parseBooleanPreference, Preference } from "./database";
 import { desktopService } from "./daemon";
 import { userAgent } from "./userAgent";
 
-const RELEASES_URL = "https://api.github.com/repos/SagerNet/sing-box/releases";
+// The update feed is this fork's releases, not upstream's.
+//
+// The client shipped from here is Jiejiebox and its installer is named
+// Jiejiebox-v<version>-windows-<arch>.exe. Upstream's feed carries SFW-... assets instead, so
+// leaving the URL alone did not merely point at the wrong project: the asset matcher below could
+// not recognise our own installer either, and the updater therefore reported "no update" forever.
+// Production and consumption have to name the same thing, which is why both halves live here.
+//
+// This used to be applied by the parent repository as a build-time overlay. It is source now: the
+// repository is spelled out rather than derived, because a placeholder that survived into a build
+// would be a silent failure, and a value injected by a build step is a value that can go missing.
+const RELEASES_URL = "https://api.github.com/repos/Piggy-Cat-bit-shadow/sing-box/releases";
 const RELEASES_PER_PAGE = 100;
 const RELEASES_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
 const EXIT_CODE_CANCELLED = 1223;
@@ -229,8 +240,13 @@ function findWindowsAsset(assets: GitHubAsset[]): GitHubAsset | null {
   if (updateArchitectureTokens === undefined) {
     throw new Error(`unsupported Windows architecture: ${process.arch}`);
   }
+  // The asset matcher has to accept the name the packaging actually produces, so it is kept as a
+  // PREFIX test on the product name: architecture selection below still works exactly as it did,
+  // only the product prefix changes, from upstream's `SFW-` to ours. The packaging side of the same
+  // decision is `scripts/package.ts`, which builds `Jiejiebox-v<version>-windows-<arch>.exe`; if one
+  // of the two is ever renamed the other must move with it, or the updater goes quiet again.
   const executables = assets.filter(
-    (asset) => asset.name.startsWith("SFW-") && asset.name.endsWith(".exe"),
+    (asset) => asset.name.startsWith("Jiejiebox-v") && asset.name.endsWith(".exe"),
   );
   for (const token of updateArchitectureTokens) {
     const match = executables.find((asset) => asset.name.endsWith(`-${token}.exe`));
