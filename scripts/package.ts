@@ -225,7 +225,15 @@ function stageWindowsCronetLibrary(
   fs.chmodSync(destinationPath, 0o644);
 }
 
-function readWindowsSigningConfiguration(): WindowsSigningConfiguration {
+function readWindowsSigningConfiguration(): WindowsSigningConfiguration | undefined {
+  // UNSIGNED BUILD OVERLAY: an absent configuration file means no certificate is
+  // configured, so the build proceeds unsigned. A file that EXISTS but is invalid
+  // is still a hard error, so a broken signing setup cannot silently ship an
+  // unsigned installer.
+  if (!fs.existsSync(signingConfigurationPath)) {
+    return undefined;
+  }
+
   let value: unknown;
   try {
     value = JSON.parse(fs.readFileSync(signingConfigurationPath, "utf-8"));
@@ -261,9 +269,9 @@ function readWindowsSigningConfiguration(): WindowsSigningConfiguration {
 async function runWindowsElectronBuilder(
   architecture: Arch,
   artifactArchitecture: string,
-  signingConfiguration: WindowsSigningConfiguration,
+  signingConfiguration: WindowsSigningConfiguration | undefined,
 ): Promise<void> {
-  const artifactName = `SFW-\${version}-${artifactArchitecture}${developmentPackage ? "-dev" : ""}.\${ext}`;
+  const artifactName = `Jiejiebox-v\${version}-windows-${artifactArchitecture}${developmentPackage ? "-dev" : ""}.\${ext}`;
   const unpackedDirectory = {
     x64: "win-unpacked",
     x86: "win-ia32-unpacked",
@@ -297,10 +305,21 @@ async function runWindowsElectronBuilder(
         npmRebuild: false,
         win: {
           artifactName,
-          signtoolOptions: {
-            certificateFile: signingConfiguration.certificateFile,
-            certificatePassword: signingConfiguration.certificatePassword,
-          },
+          // UNSIGNED BUILD OVERLAY: signtoolOptions is supplied only when a
+          // certificate was configured, and forceCodeSigning is turned back ON in
+          // exactly that case. So a certificate means a signed build is REQUIRED -
+          // electron-builder fails rather than quietly shipping an unsigned
+          // artifact - while no certificate still means a supported unsigned build.
+          // Signing itself is electron-builder's; nothing here replaces it.
+          forceCodeSigning: signingConfiguration !== undefined,
+          ...(signingConfiguration === undefined
+            ? {}
+            : {
+                signtoolOptions: {
+                  certificateFile: signingConfiguration.certificateFile,
+                  certificatePassword: signingConfiguration.certificatePassword,
+                },
+              }),
         },
         nsis: { artifactName, warningsAsErrors: false },
       },

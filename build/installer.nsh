@@ -37,6 +37,7 @@ SetFont "Segoe UI" 9
   Var reinstallExistingInstallationRadio
   Var reinstallExistingInstallation
   Var standardInstallationRadio
+  Var ciDiagnosticPath
   Var customInstallationRadio
   Var customInstallation
   Var applicationDataDirectory
@@ -717,6 +718,21 @@ FunctionEnd
   ${endif}
 !macroend
 
+!macro ciDiagnostic STAGE DETAIL
+  # CI-only, opt-in: no-op unless /CI-DIAGNOSTIC-PATH= was given. Push and Pop
+  # $9 so the caller's registers survive.
+  ${if} $ciDiagnosticPath != ""
+    Push $9
+    ClearErrors
+    FileOpen $9 "$ciDiagnosticPath" a
+    ${ifNot} ${Errors}
+      FileWrite $9 "[${STAGE}] ${DETAIL}$\r$\n"
+      FileClose $9
+    ${endif}
+    Pop $9
+  ${endif}
+!macroend
+
 !macro executeDaemonServiceCommand ACTION OPTIONS RESULT DETAILS
   Delete "$PLUGINSDIR\service-command.log"
   StrCpy ${RESULT} -1
@@ -740,6 +756,7 @@ FunctionEnd
     ${endif}
     DetailPrint "${DETAILS}"
   ${endif}
+  !insertmacro ciDiagnostic "service ${ACTION}" "exit=${RESULT} ${DETAILS}"
 !macroend
 
 !macro confirmNativeArchitecture
@@ -781,6 +798,16 @@ FunctionEnd
   StrCpy $resetWorkingDirectory 0
   StrCpy $reinstallExistingInstallation 0
   StrCpy $customInstallation 0
+  # CI-only diagnostic channel. Absent the option this is inert: $ciDiagnosticPath
+  # stays empty and every ciDiagnostic write is skipped.
+  StrCpy $ciDiagnosticPath ""
+  ClearErrors
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/CI-DIAGNOSTIC-PATH=" $R1
+  ${ifNot} ${Errors}
+    StrCpy $ciDiagnosticPath $R1
+  ${endif}
+  !insertmacro ciDiagnostic "customInit" "diagnostic channel opened; INSTDIR=$INSTDIR"
   StrCpy $migrateExistingData ${BST_CHECKED}
   StrCpy $migrateLegacyApplicationData 0
   StrCpy $applicationDataDirectory ""
@@ -972,6 +999,7 @@ FunctionEnd
     FileClose $4
   ${endif}
   Delete "$PLUGINSDIR\installation-preflight-output.txt"
+  !insertmacro ciDiagnostic "preflight" "exit=$1 ${OPTIONS} $0"
 !macroend
 
 !macro executeInstallationPreflightAsync OPTIONS
@@ -1686,6 +1714,7 @@ FunctionEnd
   ${endif}
   ${if} $1 != 0
     StrCpy $5 $1
+    !insertmacro ciDiagnostic "customInstall" "service install failed with code $1; starting rollback"
     DetailPrint "$(rollingBackInstallation)"
     StrCpy $2 -1
     ClearErrors
@@ -1695,6 +1724,7 @@ FunctionEnd
     ${endif}
     !insertmacro executeDataTransition "Rollback"
     StrCpy $1 $5
+    !insertmacro ciDiagnostic "customInstall" "rollback uninstaller exit=$2; original service install code=$1"
     ${if} $2 == 0
       Abort "$(registerServiceFailedRolledBack)"
     ${else}

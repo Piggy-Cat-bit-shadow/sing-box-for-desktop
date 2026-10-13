@@ -1,4 +1,4 @@
-productName: sing-box
+productName: Jiejiebox
 copyright: nekohasekai
 publish: null
 afterPack: scripts/afterPack.cjs
@@ -44,7 +44,12 @@ fileAssociations:
     mimeType: application/x-sing-box-profile
 win:
   appId: io.nekohasekai.sfw
-  forceCodeSigning: true
+  # EXECUTABLE NAME OVERLAY: the installed file name, not the product name.
+  # experimental/boxdd resolves <install>/sing-box.exe to authenticate the app
+  # against the daemon's signer, both when registering the service and on every
+  # peer handshake. productName above still supplies everything a user reads.
+  executableName: sing-box
+  forceCodeSigning: false
   icon: resources/icon.ico
   signtoolOptions:
     signingHashAlgorithms:

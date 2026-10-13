@@ -31,6 +31,13 @@ exports.afterPack = async (context) => {
   if (context.electronPlatformName !== "win32") {
     return;
   }
+  // UNSIGNED BUILD OVERLAY: the two binaries below are signed separately because
+  // electron-builder's app signature does not cover them. With no certificate
+  // configured there is nothing to sign, so this is a no-op rather than a failure.
+  // electron-builder's own signing support is untouched.
+  if (!fs.existsSync(path.join(context.packager.projectDir, "signing.local.json"))) {
+    return;
+  }
   for (const relativePath of [
     ["daemon", "sing-box-daemon.exe"],
     ["native", "windows_share.node"],
