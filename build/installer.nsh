@@ -28,12 +28,19 @@ SetFont "Segoe UI" 9
 # identity.ts spells it so the two can be compared as text - which is the only check
 # available between NSIS and TypeScript.
 !define INSTALLATION_LAYOUT_REGISTRY_KEY "SOFTWARE\Jiejiebox\jiejiebox"
-# The layout key a version of this fork that predates its own daemon identity wrote. Used
-# ONLY to recognise "the installation being replaced is one of ours, and it registered its
-# service under the upstream client's name" - the upstream client never writes this key, so
-# its presence distinguishes our previous version from a genuine upstream installation.
-# See installer-remove-legacy-service.ps1.
+# The layout key a version of this fork that predates its own daemon identity wrote. It is
+# reported when the legacy service is removed, as context for what was found - NOT as
+# ownership proof. The upstream client carries its own `build/installer.nsh`, and this file is
+# derived from it, so upstream writes this key too; see installer-remove-legacy-service.ps1
+# for the evidence that actually decides.
 !define LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY "SOFTWARE\SagerNet\sing-box"
+# The application data directory a version of this fork that predates its own identity used,
+# and the one place its ownership marker still lives after an upgrade has replaced the
+# installation tree. Passed to installer-remove-legacy-service.ps1, which is where the
+# ownership argument is written down: the marker inside this directory is what proves a
+# `sing-box-daemon` service is ours, and the layout key above - which the upstream client
+# writes too - proves nothing.
+!define LEGACY_APPLICATION_DATA_DIRECTORY_NAME "sing-box"
 !define DAEMON_DATA_DIRECTORY_NAME "jiejiebox-daemon"
 !define INSTALLER_STATE_DIRECTORY_NAME "jiejiebox-installer"
 !define DEFINE_SERVICE_NAME "jiejiebox-daemon"
@@ -56,6 +63,18 @@ SetFont "Segoe UI" 9
 # installer hands the same directory to installer-service.ps1 and installer-preflight.ps1,
 # which also use .NET - so all four agree on the DIRECTORY rather than on a spelling of it.
 !define COMMON_APPLICATION_DATA "$PROFILE\..\..\ProgramData"
+# The installation directory's name, as distinct from the installed executable's.
+#
+# This fork's executable must stay `sing-box.exe` (experimental/boxdd authenticates the
+# application by that path), but the DIRECTORY must not stay `sing-box`, because the upstream
+# client is per-machine too and would otherwise default to the same one. The two are separate
+# names on purpose - see renameForkInstallationDirectory, which is where the directory is
+# actually changed and where the reason it cannot be changed from electron-builder.yml is
+# written down.
+#
+# It matches `productName` and NSIS's own `${PRODUCT_NAME}`, so the directory a user sees is
+# the product name and the file inside it is the authenticated one.
+!define FORK_INSTALLATION_DIRECTORY_NAME "Jiejiebox"
 # The shell verb for "send with Taildrop". Upstream registers `Taildrop` under the same
 # machine-wide parent key, and uninstall deletes the key wholesale - so sharing it means
 # removing one client removes the other's context menu entry.
@@ -883,6 +902,11 @@ FunctionEnd
   StrCpy $previousInstallationID ""
   StrCpy $installationFailureTimer ""
   StrCpy $dataMigrationPrepared 0
+  # Give this installation its own directory, before anything reads $INSTDIR. initMultiUser
+  # set it from APP_FILENAME (the executable name) during .onInit; see
+  # chooseForkInstallationDirectory for why the executable name cannot move instead.
+  !insertmacro chooseForkInstallationDirectory
+  StrCpy $defaultInstallationDirectory $INSTDIR
   SetShellVarContext all
   # The daemon's state tree is machine-wide, so it belongs in %ProgramData% - see
   # COMMON_APPLICATION_DATA at the top of this file, where the two wrong ways to spell it
@@ -964,6 +988,7 @@ FunctionEnd
   File /oname=$PLUGINSDIR\installer-service.ps1 "${BUILD_RESOURCES_DIR}\installer-service.ps1"
   File /oname=$PLUGINSDIR\installer-stop-service.ps1 "${BUILD_RESOURCES_DIR}\installer-stop-service.ps1"
   File /oname=$PLUGINSDIR\installer-remove-legacy-service.ps1 "${BUILD_RESOURCES_DIR}\installer-remove-legacy-service.ps1"
+  File /oname=$PLUGINSDIR\installer-legacy-service-ownership.ps1 "${BUILD_RESOURCES_DIR}\installer-legacy-service-ownership.ps1"
   File /oname=$PLUGINSDIR\installer-data.ps1 "${BUILD_RESOURCES_DIR}\installer-data.ps1"
   ${if} ${FileExists} "$dataTransitionStatePath"
     nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-data.ps1" -Operation Recover -StatePath "$dataTransitionStatePath"'
@@ -1660,6 +1685,88 @@ FunctionEnd
   !define MUI_PAGE_CUSTOMFUNCTION_LEAVE scheduleInstallationFailureState
 !macroend
 
+# Gives this fork the installation directory its own name, out of the upstream client's
+# namespace.
+#
+# # The collision this prevents
+#
+# electron-builder names the default installation directory `APP_FILENAME`, which is
+# `appInfo.productFilename` for a per-machine assisted installer - and productFilename is
+# `platformSpecificOptions?.executableName ?? info.config.executableName ?? productName`
+# (appInfo.js, `AppInfo`'s constructor). So it follows the EXECUTABLE name, not the product
+# name, and this fork's `win.executableName: sing-box` made both clients default to
+#
+#     C:\Program Files\sing-box
+#
+# The upstream client is per-machine too (`nsis.perMachine: true`), so two products would
+# install over each other: the second one's Add/Remove entry replaces the first's, and either
+# uninstall takes the other's files with it.
+#
+# # Why the fix is here and not in the config
+#
+# The two names have to come apart, and only ONE of them can move. `executableName` is a
+# security dependency: experimental/boxdd resolves `<install>\sing-box.exe` and compares its
+# Authenticode signer against the daemon's, both when the service is registered and on every
+# peer handshake.
+#
+# The installation directory cannot be changed from the config either. `APP_FILENAME` is
+# passed to makensis on the command line, and a second `!define` of the same name is a fatal
+# NSIS error rather than an override - so a `!define APP_FILENAME` in this file would not win,
+# it would break the build. Verified, not assumed; see build/rename-probe.nsi.
+#
+# What is left is `$INSTDIR`. `initMultiUser` (multiUser.nsh, `setInstallModePerAllUsers`) sets
+# it to `<program files>\${APP_FILENAME}` during `.onInit`, and `customInit` runs immediately
+# afterwards (installer.nsi) and before any page is created - so this hook sees the derived
+# default and can replace it.
+#
+# # Why it reconstructs the path instead of editing it
+#
+# The first version of this appended `\..\Jiejiebox` to `$INSTDIR` when its last component was
+# `${APP_FILENAME}`. That needed `StrCpy $var $in "" -1` to read the last component, which
+# SILENTLY RETURNS NOTHING - a command-line assertion on Windows is required for that form, and
+# NSIS does not flag it. The macro compiled, ran, and renamed nothing. build/rename-probe.nsi
+# is what caught it, and this version needs no path parsing at all: the root comes from the
+# same variables electron-builder's own template uses.
+#
+# # What it deliberately does not do
+#
+# `/D=<path>` is the documented way to choose an installation directory, and a path recorded
+# from a previous installation is where that user's files already are. Both win over the
+# default; only electron-builder's own derived default is replaced.
+!macro chooseForkInstallationDirectory
+  Push $0
+  StrCpy $0 ""
+
+  # A previous installation's own record of where it went. The key is
+  # `Software\${APP_GUID}` under SHELL_CONTEXT - the same key electron-builder's multiUser.nsh
+  # reads before falling back to a default, so this agrees with it rather than competing.
+  # On a fresh machine it is empty, which is what leaves the default below in charge.
+  ReadRegStr $0 SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" "InstallLocation"
+
+  ${if} $0 == ""
+    StrCpy $0 "$PROGRAMFILES"
+    !ifdef APP_64
+      # Same condition as multiUser.nsh: a 64-bit installer's default on a 64-bit Windows is
+      # the 64-bit Program Files. On a 32-bit Windows $PROGRAMFILES already is Program Files.
+      ${if} ${RunningX64}
+        StrCpy $0 "$PROGRAMFILES64"
+      ${endif}
+    !endif
+    !ifdef APP_ARM64
+      ${if} ${RunningX64}
+      ${orif} ${IsNativeARM64}
+        StrCpy $0 "$PROGRAMFILES64"
+      ${endif}
+    !endif
+    StrCpy $0 "$0\${FORK_INSTALLATION_DIRECTORY_NAME}"
+  ${endif}
+
+  # Set INSTDIR rather than the default-only variable: everything downstream - the data
+  # directories page, the preflight, the service command, the uninstaller - reads $INSTDIR.
+  StrCpy $INSTDIR $0
+  Pop $0
+!macroend
+
 !macro customInstallBeforeCheckAppRunning
   SetDetailsPrint both
   DetailPrint "$(checkingRunningApplication)"
@@ -1670,6 +1777,20 @@ FunctionEnd
   ${StrContains} $0 "${APP_FILENAME}" $INSTDIR
   ${if} $0 == ""
     StrCpy $INSTDIR "$INSTDIR\${APP_FILENAME}"
+  ${endif}
+  # The previous version's daemon service, removed BEFORE electron-builder's
+  # `uninstallOldVersion` and before any file is written - see
+  # installer-remove-legacy-service.ps1, which owns the ownership decision and is invoked with
+  # the evidence it needs. This step has to run here rather than in customInstall for two
+  # reasons: `uninstallOldVersion` removes the old tree, and the running daemon holds files the
+  # new installation has to replace.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-remove-legacy-service.ps1" -LegacyLayoutRegistryKey "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" -LegacyApplicationDataDirectoryName "${LEGACY_APPLICATION_DATA_DIRECTORY_NAME}"'
+  Pop $1
+  ${if} $1 != 0
+    # Not fatal, and deliberately not an Abort: the service this installer registers is a
+    # different one, so a failure here leaves the new installation working and only the
+    # obsolete service behind. Failing the install would trade a leftover for a broken product.
+    DetailPrint "$(legacyServiceCleanupFailed)"
   ${endif}
   ${if} $resetWorkingDirectory == 1
     DetailPrint "$(resettingWorkingDirectory)"
@@ -1741,25 +1862,6 @@ FunctionEnd
   Pop $1
   ${if} $1 != 0
     Abort "$(stopServiceFailed)"
-  ${endif}
-  # A version of this fork that predates its own daemon identity registered its service
-  # under the UPSTREAM client's name. That service is neither ours to keep nor ours to
-  # leave: `service uninstall` in the new daemon removes only `jiejiebox-daemon`, so without
-  # this step the old service survives the upgrade pointing at a binary the upgrade has just
-  # replaced, fails at every boot, and cannot be started by the SCM.
-  #
-  # Guarded on the PREVIOUS layout key, which only this fork's pre-identity installer wrote -
-  # so on a machine that also has the upstream client installed, its daemon and its service
-  # are left completely alone. See installer-remove-legacy-service.ps1, which also refuses a
-  # service whose binary is outside the tree being installed.
-  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-remove-legacy-service.ps1" -LegacyLayoutRegistryKey "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" -InstallationDirectory "$INSTDIR"'
-  Pop $1
-  ${if} $1 != 0
-    # Not fatal, and deliberately not an Abort: the service this installer is about to
-    # register is a different one, so a failure here leaves the new installation working and
-    # only the obsolete service behind. Failing the install would trade a cosmetic leftover
-    # for a broken product.
-    DetailPrint "$(legacyServiceCleanupFailed)"
   ${endif}
   StrCpy $2 0
   ${if} $reinstallExistingInstallation == 1
@@ -1966,6 +2068,10 @@ FunctionEnd
   ${endif}
   !insertmacro restoreInstallerRegistryView
   InitPluginsDir
+  # Staged for customUnInstall, which runs the legacy service cleanup too - see there for why
+  # the uninstall direction needs it as well.
+  File /oname=$PLUGINSDIR\installer-remove-legacy-service.ps1 "${BUILD_RESOURCES_DIR}\installer-remove-legacy-service.ps1"
+  File /oname=$PLUGINSDIR\installer-legacy-service-ownership.ps1 "${BUILD_RESOURCES_DIR}\installer-legacy-service-ownership.ps1"
   File /oname=$PLUGINSDIR\installer-service.ps1 "${BUILD_RESOURCES_DIR}\installer-service.ps1"
   File /oname=$PLUGINSDIR\installer-preflight.ps1 "${BUILD_RESOURCES_DIR}\installer-preflight.ps1"
   ${GetParameters} $R0
@@ -1985,6 +2091,20 @@ FunctionEnd
       ${if} $1 != 0
         Abort "$(removeServiceFailed)"
       ${endif}
+    ${endif}
+    # The same cleanup the installer runs, for the other order: a previous version installed,
+    # this version never installed over it, and now this version is being removed. Only
+    # `jiejiebox-daemon` is registered at this point, so `service uninstall` above leaves the
+    # older `sing-box-daemon` behind - and the upgrade path removed it only if an upgrade
+    # actually happened.
+    #
+    # It is the same script, so it is the same evidence: nothing is deleted unless the
+    # ownership marker this client writes is present. On a machine where the service belongs to
+    # the upstream client, this does nothing.
+    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-remove-legacy-service.ps1" -LegacyLayoutRegistryKey "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" -LegacyApplicationDataDirectoryName "${LEGACY_APPLICATION_DATA_DIRECTORY_NAME}"'
+    Pop $1
+    ${if} $1 != 0
+      DetailPrint "$(legacyServiceCleanupFailed)"
     ${endif}
     !insertmacro unregisterTaildropVerb
     ${if} $keepUninstallData == ${BST_UNCHECKED}

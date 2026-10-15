@@ -42,6 +42,11 @@
 Unicode true
 SetCompressor /SOLID lzma
 OutFile "installer-nsh-check.exe"
+; The real installer is per-machine and elevates. This one only assembles macros and, with
+; the probe define, writes a text file - so it asks for the lowest level that lets it run
+; unattended. Requesting admin here would make the probe unimplementable in a session without
+; elevation, for no gain: nothing in the harness installs anything.
+RequestExecutionLevel user
 
 ; installer.nsh includes StrContains.nsh, which ships with electron-builder rather than
 ; with NSIS; StdUtils.nsh/nsProcess.nsh come from the same tree.
