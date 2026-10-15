@@ -15,6 +15,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 $reparsePoint = [System.IO.FileAttributes]::ReparsePoint
+
+# The daemon's service name.
+#
+# It is a machine-wide key, and the service SID checked below is DERIVED from it (SHA-1 over
+# the upper-cased UTF-16 name, see experimental/boxdd/security_windows.go). Checking the ACL
+# against another client's SID would not fail loudly - it would report "the daemon working
+# directory is missing a required access control entry" on a correct installation, or accept
+# an ACL that this daemon cannot write to.
+#
+# This literal, experimental/boxdd's `serviceName` and build/installer.nsh's
+# DEFINE_SERVICE_NAME are the same value; scripts/ci/verify-desktop-identity-consistency.py
+# in the parent repository is what keeps the three of them together.
+$daemonServiceName = "jiejiebox-daemon"
+
 $trustedInstallationIdentities = @(
     "S-1-5-18",
     "S-1-5-32-544",
@@ -169,7 +183,7 @@ namespace Box.Installer
         public static string ReadDirectoryMarker(string path)
         {
             SafeFileHandle handle = CreateFile(
-                path + ":sing-box.installation-id",
+                path + ":jiejiebox.installation-id",
                 GenericRead,
                 ShareRead | ShareWrite | ShareDelete,
                 IntPtr.Zero,
@@ -197,7 +211,7 @@ namespace Box.Installer
         public static void WriteDirectoryMarker(string path, string value)
         {
             SafeFileHandle handle = CreateFile(
-                path + ":sing-box.installation-id",
+                path + ":jiejiebox.installation-id",
                 GenericWrite,
                 ShareRead,
                 IntPtr.Zero,
@@ -668,7 +682,12 @@ try {
         $commonApplicationData = [Environment]::GetFolderPath(
             [Environment+SpecialFolder]::CommonApplicationData
         )
-        $DaemonWorkingDirectory = Join-Path $commonApplicationData "sing-box-daemon"
+        # The same directory the installer defaults to (build/installer.nsh,
+        # DAEMON_DATA_DIRECTORY_NAME) and the same one the runtime falls back to
+        # (src/main/installationLayout.ts). Previously this said `sing-box-daemon` while the
+        # installer used its own name, so a preflight that had to supply the default
+        # validated a directory the daemon would never use.
+        $DaemonWorkingDirectory = Join-Path $commonApplicationData "jiejiebox-daemon"
     }
     $workingDirectory = [System.IO.Path]::GetFullPath($DaemonWorkingDirectory)
     if (Test-PathOverlap $InstallationDirectory $workingDirectory) {
@@ -821,7 +840,7 @@ try {
     $expectedIdentities = @{
         "S-1-5-18" = $false
         "S-1-5-32-544" = $false
-        (Get-ServiceSid "sing-box-daemon") = $false
+        (Get-ServiceSid $daemonServiceName) = $false
     }
     $accessControl = Get-Acl -LiteralPath $workingDirectory
     $owner = $accessControl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value

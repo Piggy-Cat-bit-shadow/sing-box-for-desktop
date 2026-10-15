@@ -4,12 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
+import { daemonDataDirectoryName, installationRegistryPath } from "./identity";
+
 export interface WindowsInstallationLayout {
   applicationDataDirectory: string;
   daemonDataDirectory: string;
 }
 
-const installationRegistryPath = String.raw`SOFTWARE\SagerNet\sing-box`;
+// The key the installer writes and this runtime reads, declared once in identity.ts with the
+// rest of the Windows identity. Both sides have to name the same key: the installer would
+// otherwise record a layout nobody reads, and the runtime would silently fall back to the
+// defaults - which install to a directory it does not own.
+//
+// It is this fork's own key. Upstream records its layout under
+// `SOFTWARE\SagerNet\sing-box`, and reading that key would make this client adopt the
+// upstream client's application data directory and daemon data directory wholesale.
 
 const installationLayoutScript = String.raw`
 $ErrorActionPreference = "Stop"
@@ -19,7 +28,7 @@ $applicationDataDirectory = $env:sing_box_default_application_data_directory
 $commonApplicationData = [Environment]::GetFolderPath(
   [Environment+SpecialFolder]::CommonApplicationData
 )
-$daemonDataDirectory = Join-Path $commonApplicationData "sing-box-daemon"
+$daemonDataDirectory = Join-Path $commonApplicationData $env:sing_box_daemon_data_directory_name
 
 $registryView = if ([Environment]::Is64BitOperatingSystem) {
   [Microsoft.Win32.RegistryView]::Registry64
@@ -109,6 +118,7 @@ export function readWindowsInstallationLayout(
         env: {
           ...process.env,
           sing_box_default_application_data_directory: defaultApplicationDataDirectory,
+          sing_box_daemon_data_directory_name: daemonDataDirectoryName,
           sing_box_installation_registry_path: installationRegistryPath,
           sing_box_installation_layout_output: outputPath,
         },

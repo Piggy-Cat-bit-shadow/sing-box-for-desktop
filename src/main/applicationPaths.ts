@@ -2,6 +2,10 @@ import { app } from "electron";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  applicationDataDirectoryName,
+  daemonDataDirectoryName,
+} from "./identity";
 import { readWindowsInstallationLayout } from "./installationLayout";
 import { secureApplicationUserData } from "./userDataSecurity";
 
@@ -16,14 +20,18 @@ export function configureApplicationPaths(developmentUserDataPath: string): Appl
   if (configuredPaths !== null) {
     return configuredPaths;
   }
-  const defaultUserDataPath = join(app.getPath("appData"), "sing-box");
+  // The per-user fallback, used outside a Windows installation and by the development
+  // server. It has to be this fork's own directory: the upstream client keeps its
+  // settings, profiles and session in %APPDATA%\sing-box, and sharing that tree means
+  // each client reads the other's selected profile, preferences and window state.
+  const defaultUserDataPath = join(app.getPath("appData"), applicationDataDirectoryName);
   let paths: ApplicationPaths;
   if (developmentUserDataPath !== "") {
     paths = {
       userData: developmentUserDataPath,
       daemonData:
         process.platform === "win32"
-          ? "C:\\ProgramData\\sing-box-daemon"
+          ? `C:\\ProgramData\\${daemonDataDirectoryName}`
           : "/var/lib/sing-box-daemon",
     };
   } else if (process.platform === "win32" && app.isPackaged) {
@@ -37,7 +45,7 @@ export function configureApplicationPaths(developmentUserDataPath: string): Appl
       userData: defaultUserDataPath,
       daemonData:
         process.platform === "win32"
-          ? "C:\\ProgramData\\sing-box-daemon"
+          ? `C:\\ProgramData\\${daemonDataDirectoryName}`
           : "/var/lib/sing-box-daemon",
     };
   }

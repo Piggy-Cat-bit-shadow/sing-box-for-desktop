@@ -42,8 +42,23 @@ fileAssociations:
     name: sing-box profile
     description: sing-box profile
     mimeType: application/x-sing-box-profile
+# APP IDENTITY OVERLAY: `io.nekohasekai.sfw` is the UPSTREAM client's Windows application
+# identity, and sharing it is what stops the two clients coexisting. electron-builder
+# derives the uninstall registry key and the uninstaller file name from a UUID v5 of that
+# value, and src/main/index.ts passes the same value to Electron's setAppUserModelId - so
+# two clients on one machine would collide in Add/Remove Programs, share one taskbar group,
+# and overwrite each other's notification registration.
+#
+# This is installation identity, not branding: `productName` above already supplies
+# everything a user reads, and the Linux appId (`.sfl`) is left alone because this change is
+# scoped to the Windows coexistence work.
+#
+# The comment sits ABOVE the `win:` key rather than inside the block, because
+# scripts/ci/apply-desktop-branding-overlay.py owns this block and matches it verbatim from
+# `win:\n  appId: ...`; anything between the two makes the overlay refuse rather than
+# half-apply. See the appId rule in that file for the same reasoning in its own words.
 win:
-  appId: io.nekohasekai.sfw
+  appId: io.github.piggycatbitshadow.jiejiebox
   # EXECUTABLE NAME OVERLAY: the installed file name, not the product name.
   # experimental/boxdd resolves <install>/sing-box.exe to authenticate the app
   # against the daemon's signer, both when registering the service and on every

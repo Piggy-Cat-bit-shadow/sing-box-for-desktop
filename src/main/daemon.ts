@@ -8,6 +8,7 @@ import { ManagedService } from "../shared/gen/daemon/managed_service_pb";
 import { StartedService } from "../shared/gen/daemon/started_service_pb";
 import { DesktopService } from "../shared/gen/experimental/boxdd/desktop_service_pb";
 import { developmentSwitchValue } from "./development";
+import { daemonServiceName } from "./identity";
 import { localeInterceptor } from "./locale";
 import { daemonWorkerTransport } from "./worker";
 
@@ -15,9 +16,13 @@ let daemonTransport: Transport | null;
 if (process.platform === "win32" && app.isPackaged) {
   daemonTransport = daemonWorkerTransport;
 } else {
+  // The packaged Windows client reaches the daemon through the application worker relay
+  // above; this is the direct connection used in development and on Linux. It has to name
+  // the fork's own pipe, or a development client would attach to the upstream daemon -
+  // which is a different product with a different set of start options.
   const defaultSocketPath =
     process.platform === "win32"
-      ? "\\\\.\\pipe\\ProtectedPrefix\\Administrators\\sing-box"
+      ? `\\\\.\\pipe\\ProtectedPrefix\\Administrators\\${daemonServiceName}`
       : process.platform === "linux"
         ? "/run/sing-box.socket"
         : null;

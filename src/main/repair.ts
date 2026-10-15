@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { SETUP_CALL } from "../shared/ipc";
 import type { ProfilesResult } from "../shared/ipc";
 import { applicationPaths } from "./applicationPaths";
+import { daemonExecutableName, daemonServiceName } from "./identity";
 
 const EXIT_CODE_CANCELLED = 1223;
 const EXIT_CODE_LAUNCH_FAILED = 1224;
@@ -13,7 +14,7 @@ const repairSupported = process.platform === "win32" || process.platform === "li
 
 export function daemonBinaryPath(): string {
   const binaryName =
-    process.platform === "win32" ? "sing-box-daemon.exe" : "sing-box-daemon";
+    process.platform === "win32" ? daemonExecutableName : "sing-box-daemon";
   if (app.isPackaged) {
     return join(process.resourcesPath, "daemon", binaryName);
   }
@@ -48,10 +49,14 @@ export function bundledDaemonVersion(): Promise<string | null> {
       if (result.exitCode !== 0) {
         return null;
       }
+      // `sing-box-daemon version <v>` became `<serviceName> version <v>` when the daemon
+      // took its own service identity, so the prefix is derived rather than spelled: a
+      // literal here would silently stop matching and the version probe would return null.
+      const versionPrefix = `${daemonServiceName} version `;
       const versionLine = result.stdout
         .split("\n")
-        .find((line) => line.startsWith("sing-box-daemon version "));
-      return versionLine?.slice("sing-box-daemon version ".length).trim() || null;
+        .find((line) => line.startsWith(versionPrefix));
+      return versionLine?.slice(versionPrefix.length).trim() || null;
     } catch {
       return null;
     }

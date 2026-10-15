@@ -29,6 +29,11 @@ import { registerCore } from "./core";
 import { settingsDatabase } from "./database";
 import { developmentRendererURL, developmentSwitchValue } from "./development";
 import { applyDisplayScaleFactor } from "./displayScale";
+import {
+  acceptedDeepLinkSchemes,
+  applicationUserModelId,
+  registeredDeepLinkScheme,
+} from "./identity";
 import { hasLoginItemArgument, migrateLoginItem, wasOpenedAtLogin } from "./loginItem";
 import { registerNotifications } from "./notifications";
 import { registerPreferences } from "./preferences";
@@ -287,14 +292,27 @@ function parseDeepLink(link: string): URL | null {
   } catch {
     return null;
   }
-  if (parsed.protocol !== "sing-box:") {
+  // Every accepted spelling is normalised to the canonical one, so the rest of the file -
+  // and `deepLinkFromArguments` below - only ever sees this client's own scheme. The
+  // `sing-box://` form stays accepted because that is the format other sing-box clients
+  // share and put on the clipboard; it is simply not what this client registers as its
+  // default handler, so the two clients do not take the handler from each other.
+  const scheme = parsed.protocol.slice(0, -1).toLowerCase();
+  if (!acceptedDeepLinkSchemes.includes(scheme)) {
     return null;
   }
   if (parsed.host !== "") {
-    return parsed;
+    if (scheme === registeredDeepLinkScheme) {
+      return parsed;
+    }
+    return new URL(
+      `${registeredDeepLinkScheme}://${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`,
+    );
   }
   try {
-    return new URL(`sing-box://${parsed.pathname}${parsed.search}${parsed.hash}`);
+    return new URL(
+      `${registeredDeepLinkScheme}://${parsed.pathname}${parsed.search}${parsed.hash}`,
+    );
   } catch {
     return null;
   }
@@ -405,8 +423,13 @@ function deliverTaildropSend(files: TaildropSendFile[]) {
 
 const queueTaildropSend = createTaildropSendBatcher(deliverTaildropSend);
 
+// A deep link is a URI argument this process was started or re-invoked with. Matched
+// against every accepted spelling, because the argument arrives from the shell and carries
+// whichever form the source used.
 function deepLinkFromArguments(argv: string[]): string | undefined {
-  return argv.find((argument) => argument.startsWith("sing-box://"));
+  return argv.find((argument) =>
+    acceptedDeepLinkSchemes.some((scheme) => argument.startsWith(`${scheme}://`)),
+  );
 }
 
 function profileFileFromArguments(argv: string[]): string | undefined {
@@ -417,9 +440,17 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   app.quit();
 } else {
-  app.setAsDefaultProtocolClient("sing-box");
+  // Registered under this client's own scheme. `sing-box://` is deliberately NOT claimed:
+  // protocol registration is per-machine and last-writer-wins, so claiming it would take
+  // the handler away from the upstream client and from every other sing-box client, and
+  // whichever was installed last would win. Links in that form are still parsed (see
+  // parseDeepLink), so sharing between clients keeps working.
+  app.setAsDefaultProtocolClient(registeredDeepLinkScheme);
   if (process.platform === "win32") {
-    app.setAppUserModelId("io.nekohasekai.sfw");
+    // Must match electron-builder's win.appId, which is what the installer stamps into the
+    // shortcut and the uninstall entry. Two clients sharing it group into one taskbar
+    // button and overwrite each other's notification registration.
+    app.setAppUserModelId(applicationUserModelId);
   }
 
   app.on("second-instance", (_event, argv, workingDirectory) => {

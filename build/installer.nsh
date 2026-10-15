@@ -4,8 +4,56 @@ SetFont "Segoe UI" 9
 
 !include WinMessages.nsh
 
-!define INSTALLATION_LAYOUT_REGISTRY_KEY "Software\SagerNet\sing-box"
-!define TAILDROP_VERB_REGISTRY_KEY "Software\Classes\*\shell\Taildrop"
+# ---------------------------------------------------------------------------
+# Machine-global identity.
+#
+# These strings name resources the operating system owns, not resources this installation
+# owns, so two clients that share one cannot be installed, upgraded or removed
+# independently. They are the installer's half of the pair whose other half is
+# src/main/identity.ts; the two are checked against each other by
+# scripts/ci/verify-desktop-identity-consistency.py in the parent repository.
+#
+# INSTALLATION_LAYOUT_REGISTRY_KEY and DAEMON_DATA_DIRECTORY_NAME must agree with
+# `installationRegistryPath` and `daemonDataDirectoryName` there. DEFINE_SERVICE_NAME must
+# agree with experimental/boxdd's `serviceName`, which is also the name the daemon's named
+# pipe is bound under - a disagreement leaves the client unable to reach its own daemon.
+#
+# Deliberately NOT isolated here: the installed executable stays `sing-box.exe` and the
+# daemon file stays `sing-box-daemon.exe`. experimental/boxdd authenticates the application
+# by resolving <install>/sing-box.exe and comparing its signer against the daemon's, so the
+# application file name is part of the security chain. Neither is a collision: the two
+# clients install into different directories.
+# ---------------------------------------------------------------------------
+# The registry path is case-insensitive to Windows, but it is spelled exactly as
+# identity.ts spells it so the two can be compared as text - which is the only check
+# available between NSIS and TypeScript.
+!define INSTALLATION_LAYOUT_REGISTRY_KEY "SOFTWARE\Jiejiebox\jiejiebox"
+!define DAEMON_DATA_DIRECTORY_NAME "jiejiebox-daemon"
+!define INSTALLER_STATE_DIRECTORY_NAME "jiejiebox-installer"
+!define DEFINE_SERVICE_NAME "jiejiebox-daemon"
+# The all-users profile, i.e. %ProgramData%.
+#
+# NOT `$APPDATA` under `SetShellVarContext all`: that call does not redirect the profile
+# variables, so `$APPDATA` stays the INVOKING user's roaming profile - a private directory
+# the SYSTEM daemon cannot rely on, and a different one for every user who happens to run
+# the installer.
+#
+# NOT `$COMMONAPPDATA` either, which does not exist. NSIS has no such variable, an unknown
+# `$NAME` in a command is only a WARNING, and it resolves to the empty string - so the
+# daemon's state would have gone to the root of the current drive with nothing failing.
+# (`makensis` warns 6000 about it; build/check-installer.nsh is what runs makensis over
+# this file outside a full packaging run.)
+#
+# %ProgramData% is `%USERPROFILE%\AppData\Roaming` with its last two components removed,
+# which is what this expresses. The runtime's own fallback in
+# src/main/installationLayout.ts asks .NET for CommonApplicationData instead, and this
+# installer hands the same directory to installer-service.ps1 and installer-preflight.ps1,
+# which also use .NET - so all four agree on the DIRECTORY rather than on a spelling of it.
+!define COMMON_APPLICATION_DATA "$PROFILE\..\..\ProgramData"
+# The shell verb for "send with Taildrop". Upstream registers `Taildrop` under the same
+# machine-wide parent key, and uninstall deletes the key wholesale - so sharing it means
+# removing one client removes the other's context menu entry.
+!define TAILDROP_VERB_REGISTRY_KEY "Software\Classes\*\shell\JiejieboxTaildrop"
 
 !ifndef BUILD_UNINSTALLER
   !include StrContains.nsh
@@ -821,7 +869,12 @@ FunctionEnd
   StrCpy $installationFailureTimer ""
   StrCpy $dataMigrationPrepared 0
   SetShellVarContext all
-  StrCpy $daemonDataDirectory "$APPDATA\sing-box-daemon"
+  # The daemon's state tree is machine-wide, so it belongs in %ProgramData% - see
+  # COMMON_APPLICATION_DATA at the top of this file, where the two wrong ways to spell it
+  # are explained. %ProgramData% is also where the runtime's own fallback looks for it
+  # (src/main/installationLayout.ts, CommonApplicationData), so this is the same path
+  # whether or not an installation layout has been recorded yet.
+  StrCpy $daemonDataDirectory "${COMMON_APPLICATION_DATA}\${DAEMON_DATA_DIRECTORY_NAME}"
   StrCpy $0 0
   ReadRegDWORD $0 HKLM "${INSTALLATION_LAYOUT_REGISTRY_KEY}" "LayoutVersion"
   ${if} $0 == 2
@@ -844,7 +897,7 @@ FunctionEnd
     Pop $installationID
   ${endif}
   ${if} $daemonDataDirectory == ""
-    StrCpy $daemonDataDirectory "$APPDATA\sing-box-daemon"
+    StrCpy $daemonDataDirectory "${COMMON_APPLICATION_DATA}\${DAEMON_DATA_DIRECTORY_NAME}"
   ${endif}
   StrCpy $previousApplicationDataDirectory $applicationDataDirectory
   StrCpy $previousDaemonDataDirectory $daemonDataDirectory
@@ -885,10 +938,16 @@ FunctionEnd
   StrCpy $defaultApplicationDataDirectory $applicationDataDirectory
   StrCpy $defaultDaemonDataDirectory $daemonDataDirectory
   StrCpy $workingDirectory $daemonDataDirectory
-  StrCpy $dataTransitionStatePath "$APPDATA\sing-box-installer\data-transition.json"
+  # $PROFILE, not $APPDATA: the state file is per-user scratch space for one installer run,
+  # and installer-data.ps1 validates this path against the CURRENT USER's roaming profile
+  # (CommonApplicationData is NOT where it looks - see Initialize-TransitionStateStorage).
+  # $PROFILE is the profile this installer was launched from and does not move when the
+  # shell variable context does.
+  StrCpy $dataTransitionStatePath "$PROFILE\AppData\Roaming\${INSTALLER_STATE_DIRECTORY_NAME}\data-transition.json"
   InitPluginsDir
   File /oname=$PLUGINSDIR\installer-preflight.ps1 "${BUILD_RESOURCES_DIR}\installer-preflight.ps1"
   File /oname=$PLUGINSDIR\installer-service.ps1 "${BUILD_RESOURCES_DIR}\installer-service.ps1"
+  File /oname=$PLUGINSDIR\installer-stop-service.ps1 "${BUILD_RESOURCES_DIR}\installer-stop-service.ps1"
   File /oname=$PLUGINSDIR\installer-data.ps1 "${BUILD_RESOURCES_DIR}\installer-data.ps1"
   ${if} ${FileExists} "$dataTransitionStatePath"
     nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-data.ps1" -Operation Recover -StatePath "$dataTransitionStatePath"'
@@ -1659,7 +1718,10 @@ FunctionEnd
     ${endif}
   ${endif}
   DetailPrint "$(stoppingService)"
-  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "if (Get-Service -Name sing-box-daemon -ErrorAction SilentlyContinue) { Stop-Service -Name sing-box-daemon -Force -ErrorAction Stop; (Get-Service -Name sing-box-daemon).WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(10)) }"'
+  # Stopping a service by name is only safe when the service is ours - see
+  # installer-stop-service.ps1, which resolves the SCM's own record of the daemon's path and
+  # refuses to touch a service registered outside this installation.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-stop-service.ps1" -ServiceName "${DEFINE_SERVICE_NAME}" -InstallationDirectory "$INSTDIR"'
   Pop $1
   ${if} $1 != 0
     Abort "$(stopServiceFailed)"
@@ -1856,7 +1918,10 @@ FunctionEnd
   StrCpy $applicationDataDirectory ""
   StrCpy $installationID ""
   SetShellVarContext all
-  StrCpy $daemonDataDirectory "$APPDATA\sing-box-daemon"
+  # Read back from the same place the installer wrote. This is the fallback for a layout
+  # key that was never written; it has to be %ProgramData% for the same reason customInit
+  # says so - see COMMON_APPLICATION_DATA at the top of this file.
+  StrCpy $daemonDataDirectory "${COMMON_APPLICATION_DATA}\${DAEMON_DATA_DIRECTORY_NAME}"
   StrCpy $0 0
   ReadRegDWORD $0 HKLM "${INSTALLATION_LAYOUT_REGISTRY_KEY}" "LayoutVersion"
   ${if} $0 == 2

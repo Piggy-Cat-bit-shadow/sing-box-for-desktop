@@ -16,12 +16,23 @@ param(
 $ErrorActionPreference = "Stop"
 $reparsePoint = [System.IO.FileAttributes]::ReparsePoint
 
+# This client's own machine-wide identity, matching build/installer.nsh's
+# INSTALLER_STATE_DIRECTORY_NAME and src/main/identity.ts. See installer-preflight.ps1 for
+# why the three copies exist and what checks them against each other.
+#
+# The state directory below is shared by nothing: it holds one client's half-finished data
+# migration, and its Recover operation runs from the installer's customInit on EVERY
+# install. A shared directory therefore lets one client's installer commit or roll back the
+# other client's migration - which moves application data directories.
+$installerStateDirectoryName = "jiejiebox-installer"
+$installationIdStreamName = "jiejiebox.installation-id"
+
 function Initialize-TransitionStateStorage() {
     $commonApplicationData = [Environment]::GetFolderPath(
         [Environment+SpecialFolder]::CommonApplicationData
     )
     $expectedPath = Join-Path `
-        (Join-Path $commonApplicationData "sing-box-installer") `
+        (Join-Path $commonApplicationData $installerStateDirectoryName) `
         "data-transition.json"
     if (-not [System.IO.Path]::GetFullPath($StatePath).Equals(
             [System.IO.Path]::GetFullPath($expectedPath),
@@ -297,7 +308,7 @@ function Read-ApplicationDataDirectoryID([string]$Path) {
     try {
         return [string](Get-Content `
             -LiteralPath $directory `
-            -Stream "sing-box.installation-id" `
+            -Stream $installationIdStreamName `
             -Raw `
             -ErrorAction Stop)
     } catch [System.IO.FileNotFoundException] {
