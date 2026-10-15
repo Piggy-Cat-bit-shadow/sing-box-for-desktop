@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$LegacyLayoutRegistryKey,
-    [Parameter(Mandatory = $true)][string]$InstallationDirectory
+    [Parameter(Mandatory = $true)][string]$LegacyApplicationDataDirectoryName
 )
 
 # Removes the daemon service a PREVIOUS version of this fork registered under the upstream
@@ -10,48 +10,42 @@ param(
 #
 # Until this fork took its own daemon identity, `service install` created a service called
 # `sing-box-daemon` - the same name the upstream client's daemon uses. The daemon now
-# registers `jiejiebox-daemon`, so `service uninstall` removes only that one and the old
-# service is left behind, still pointing at
-# `<install>\resources\daemon\sing-box-daemon.exe`, which the upgrade has just replaced.
+# registers `jiejiebox-daemon`, so `service uninstall` removes only that one, and the old
+# service is left behind pointing at `<tree>\resources\daemon\sing-box-daemon.exe`.
 #
-# That left-behind service is not cosmetic. It is configured for automatic start, and the
-# binary it names is re-signed on every release, so Windows cannot start it after an
-# upgrade: the SCM records a service that fails at every boot, retries through its recovery
-# actions, and - because the old daemon authenticated its peers by signer - could never have
-# worked against the new binaries anyway. `sc.exe query` finds it, and the next install's
-# guard does not expect it.
+# That left-behind service is not cosmetic: it starts automatically, its binary is re-signed
+# on every release so Windows cannot start it after an upgrade, and its recovery actions
+# retry forever. But that is the SECOND problem. The first is that deleting a service named
+# `sing-box-daemon` on a machine that also has the UPSTREAM client installed would delete
+# THAT client's service.
 #
-# # Why the guard, and why this specific one
+# # What decides, and why the obvious guard was wrong
 #
-# `HKLM\SOFTWARE\SagerNet\sing-box` is the installation-layout key the pre-identity fork
-# wrote, and the upstream client does not write it at all. So its presence means "the
-# installation being replaced is one of OURS", and this step runs only then. The service
-# name alone would have been the wrong guard: it is the name the upstream client's daemon
-# uses, and deleting a service by name on a machine that also has the upstream client
-# installed is exactly the accident this whole change exists to prevent.
+# The decision lives in installer-legacy-service-ownership.ps1, which is separate so it can be
+# tested without a service, a volume or an installation - see
+# scripts/test-legacy-service-ownership.ps1. Read it for the signals.
 #
-# The installation-directory check is a second guard rather than a redundancy: a service
-# whose binary lives outside the tree being installed is not this installation's, whatever
-# the registry says, and is left alone.
+# The short version of the correction: the first version of this used
+# `HKLM\SOFTWARE\SagerNet\sing-box` as "the key only the old fork wrote". The upstream client
+# carries a `build/installer.nsh` too, and the fork's installer.nsh is derived from it, so
+# upstream writes the same key. The ownership proof is the marker this client writes into its
+# own user-data directory (`secureApplicationUserData`) and upstream does not.
+#
+# # Fail closed
+#
+# Every signal must hold. If any cannot be evaluated the script reports the reason and does
+# nothing. A leftover service is recoverable by hand and by a later release; a service deleted
+# from another product is not.
 $ErrorActionPreference = "Stop"
 
-$legacyServiceName = "sing-box-daemon"
+. (Join-Path $PSScriptRoot "installer-legacy-service-ownership.ps1")
 
-$layoutKey = Get-ItemProperty -Path $LegacyLayoutRegistryKey -ErrorAction SilentlyContinue
-if ($null -eq $layoutKey) {
-    Write-Output "no previous installation layout at $LegacyLayoutRegistryKey; nothing to remove"
-    exit 0
-}
+$serviceName = "sing-box-daemon"
 
-$service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$legacyServiceName'" -ErrorAction SilentlyContinue
-if ($null -eq $service) {
-    Write-Output "no '$legacyServiceName' service to remove"
-    exit 0
-}
-
-$imagePath = $null
-if (-not [string]::IsNullOrWhiteSpace($service.PathName)) {
-    $commandLine = $service.PathName.Trim()
+$service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+$imagePath = ""
+if ($null -ne $service -and -not [string]::IsNullOrWhiteSpace($service.PathName)) {
+    $commandLine = ([string]$service.PathName).Trim()
     if ($commandLine.StartsWith('"')) {
         $end = $commandLine.IndexOf('"', 1)
         if ($end -gt 1) { $imagePath = $commandLine.Substring(1, $end - 1) }
@@ -60,58 +54,54 @@ if (-not [string]::IsNullOrWhiteSpace($service.PathName)) {
     }
 }
 
-$belongsToThisInstallation = $false
-if (-not [string]::IsNullOrWhiteSpace($imagePath)) {
-    try {
-        $expectedRoot = [System.IO.Path]::GetFullPath($InstallationDirectory).TrimEnd("\")
-        $actualDirectory = [System.IO.Path]::GetDirectoryName(
-            [System.IO.Path]::GetFullPath($imagePath)
-        ).TrimEnd("\")
-        $belongsToThisInstallation = $actualDirectory.Equals(
-            $expectedRoot,
-            [System.StringComparison]::OrdinalIgnoreCase
-        ) -or $actualDirectory.StartsWith(
-            $expectedRoot + "\",
-            [System.StringComparison]::OrdinalIgnoreCase
-        )
-    } catch {
-        $belongsToThisInstallation = $false
-    }
-}
+$decision = Get-JiejieboxLegacyOwnershipDecision `
+    -ServiceName $serviceName `
+    -ServiceExists ($null -ne $service) `
+    -ServiceImagePath $imagePath `
+    -LegacyApplicationDataDirectoryName $LegacyApplicationDataDirectoryName
 
-if (-not $belongsToThisInstallation) {
-    Write-Output "the '$legacyServiceName' service belongs to another installation ($imagePath); leaving it alone"
+if (-not $decision.CanRemove) {
+    Write-Output "skipping legacy service cleanup: $($decision.Reason)"
     exit 0
 }
 
-if ($service.State -ne "Stopped") {
-    Stop-Service -Name $legacyServiceName -Force -ErrorAction Stop
+Write-Output "Jiejiebox ownership proven for the '$serviceName' service:"
+Write-Output "  image            $($decision.ImagePath)"
+Write-Output "  installation     $($decision.Root)"
+Write-Output "  marker           $($decision.ProofPath)"
+if (-not [string]::IsNullOrWhiteSpace($LegacyLayoutRegistryKey)) {
+    $layoutKey = Get-ItemProperty -Path $LegacyLayoutRegistryKey -ErrorAction SilentlyContinue
+    if ($null -ne $layoutKey) {
+        Write-Output "  previous layout  $LegacyLayoutRegistryKey (LayoutVersion $($layoutKey.LayoutVersion))"
+    }
 }
 
-# `sc.exe delete` rather than the service manager API: it is the same call the installer's
-# own cleanup steps use, and it reports "marked for deletion" the ordinary way when the
-# service still has an open handle. The binary it named is about to be replaced either way,
-# so a service left in that state is no more useful than one removed.
+if ($service.State -ne "Stopped") {
+    Stop-Service -Name $serviceName -Force -ErrorAction Stop
+}
+
+# `sc.exe delete` rather than the service manager API: it is the same call the installer's own
+# cleanup steps use, and it reports "marked for deletion" the ordinary way when the service
+# still has an open handle.
 $sc = Join-Path $env:SystemRoot "System32\sc.exe"
-& $sc.exe delete $legacyServiceName | Out-Null
-$deleted = $LASTEXITCODE
-if ($deleted -ne 0) {
-    Write-Output "sc.exe delete '$legacyServiceName' exited $deleted"
+& $sc.exe delete $serviceName | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "sc.exe delete '$serviceName' exited $LASTEXITCODE"
 } else {
-    Write-Output "removed the previous version's '$legacyServiceName' service"
+    Write-Output "removed the previous version's '$serviceName' service"
 }
 
 # The event log source went with it. A source that cannot be removed is not a failure: it is
-# keyed by name under HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application, removing
-# it needs the same elevation this installer already has, and a leftover source is inert.
+# keyed by name under HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application, removing it
+# needs the elevation this installer already has, and a leftover source is inert.
 try {
-    $eventLogKey = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$legacyServiceName"
+    $eventLogKey = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$serviceName"
     if (Test-Path -LiteralPath $eventLogKey) {
         Remove-Item -LiteralPath $eventLogKey -Recurse -Force -ErrorAction Stop
-        Write-Output "removed the previous version's '$legacyServiceName' event log source"
+        Write-Output "removed the previous version's '$serviceName' event log source"
     }
 } catch {
-    Write-Output "could not remove the '$legacyServiceName' event log source: $($_.Exception.Message)"
+    Write-Output "could not remove the '$serviceName' event log source: $($_.Exception.Message)"
 }
 
 exit 0
