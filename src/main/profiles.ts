@@ -10,10 +10,16 @@ import type {
   ProfileCreate,
   ProfileMetadata,
   ProfileMetadataPatch,
+  ProfileSubscriptionQuota,
   ProfileType,
   ProfilesResult,
   ProfilesState,
 } from "../shared/ipc";
+import {
+  SUBSCRIPTION_QUOTA_COMPATIBILITY_USER_AGENTS,
+  SUBSCRIPTION_USER_INFO_HEADER,
+  parseSubscriptionUserInfo,
+} from "../shared/subscription";
 import { writeApplicationCacheFile } from "./appCache";
 import { desktopService } from "./daemon";
 import { Preference, settingsDatabase } from "./database";
@@ -37,6 +43,15 @@ interface ProfileRow {
   auto_update_interval_minutes: number;
   last_updated: number | null;
   item_order: number;
+}
+
+interface SubscriptionQuotaRow {
+  profile_id: string;
+  upload: number | null;
+  download: number | null;
+  total: number | null;
+  expire: number | null;
+  updated_at: number;
 }
 
 function profilesDirectory(): string {
@@ -106,11 +121,131 @@ function profileFromRow(row: ProfileRow): ProfileMetadata {
   return profile;
 }
 
+// ---------------------------------------------------------------------------
+// Subscription quota
+//
+// The quota lives in its own table (see database.ts), and it travels to the renderer on the
+// profile it belongs to. It is NOT a field of the profile row, and it is NOT derived from
+// `lastUpdated`: a profile update that succeeds while the provider omits the header leaves
+// the content fresh and the quota stale, and the two timestamps have to be able to say so.
+// ---------------------------------------------------------------------------
+
+function subscriptionQuotaFromRow(row: SubscriptionQuotaRow): ProfileSubscriptionQuota {
+  const quota: ProfileSubscriptionQuota = { updatedAt: row.updated_at };
+  // null is "this snapshot does not carry that field", which is not the same as 0 - a
+  // provider that sent no expire has no expiry, while `expire=0` is one that expired in 1970
+  // and means "no expiry set" to most panels.
+  if (row.upload !== null) {
+    quota.upload = row.upload;
+  }
+  if (row.download !== null) {
+    quota.download = row.download;
+  }
+  if (row.total !== null) {
+    quota.total = row.total;
+  }
+  if (row.expire !== null) {
+    quota.expire = row.expire;
+  }
+  return quota;
+}
+
+function readSubscriptionQuota(profileId: string): ProfileSubscriptionQuota | undefined {
+  const row = settingsDatabase()
+    .prepare("SELECT * FROM profile_subscription_quota WHERE profile_id = ?")
+    .get(profileId) as SubscriptionQuotaRow | undefined;
+  return row === undefined ? undefined : subscriptionQuotaFromRow(row);
+}
+
+function writeSubscriptionQuota(
+  profileId: string,
+  quota: ProfileSubscriptionQuota,
+): void {
+  // The statement this whole table exists for: an UPSERT against a table that
+  // `CREATE TABLE IF NOT EXISTS` adds to an existing database, so an upgraded settings.db
+  // behaves exactly like a fresh one.
+  settingsDatabase()
+    .prepare(
+      `INSERT INTO profile_subscription_quota
+         (profile_id, upload, download, total, expire, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(profile_id) DO UPDATE SET
+         upload = excluded.upload,
+         download = excluded.download,
+         total = excluded.total,
+         expire = excluded.expire,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      profileId,
+      quota.upload ?? null,
+      quota.download ?? null,
+      quota.total ?? null,
+      quota.expire ?? null,
+      quota.updatedAt,
+    );
+}
+
+function deleteSubscriptionQuota(profileId: string): void {
+  settingsDatabase()
+    .prepare("DELETE FROM profile_subscription_quota WHERE profile_id = ?")
+    .run(profileId);
+}
+
+/**
+ * The quota change a successful fetch produced.
+ *
+ * Three outcomes, and the difference between them is the whole point:
+ *
+ *   `undefined`            the provider sent no header. Keep the last known snapshot and
+ *                          leave its `updatedAt` alone, so the UI can say how old it is
+ *                          instead of showing an empty card.
+ *   `{ quota: {...} }`     the provider sent a header. It is authoritative: fields it left
+ *                          out are cleared rather than inherited from the previous
+ *                          snapshot, so an old `expire` cannot attach itself to a new
+ *                          `total`. `updatedAt` moves to now.
+ *   `{ quota: null }`      the snapshot is gone: the profile's URL changed, so the old
+ *                          account's quota is not this subscription's.
+ */
+type SubscriptionQuotaUpdate = { quota: ProfileSubscriptionQuota | null } | undefined;
+
+function quotaUpdateFromHeaders(
+  headers: Headers,
+): SubscriptionQuotaUpdate {
+  const quota = parseSubscriptionUserInfo(headers.get(SUBSCRIPTION_USER_INFO_HEADER));
+  if (quota === undefined) {
+    return undefined;
+  }
+  return { quota: { ...quota, updatedAt: Date.now() } };
+}
+
+function applySubscriptionQuota(id: string, update: SubscriptionQuotaUpdate): void {
+  if (update === undefined) {
+    return;
+  }
+  if (update.quota === null) {
+    deleteSubscriptionQuota(id);
+    return;
+  }
+  writeSubscriptionQuota(id, update.quota);
+}
+
+// `updatedAt: Date.now()` is stamped where the snapshot is read, not where it is written, so
+// a slow body download cannot make the quota look older than it is - and so the value means
+// "when this header arrived" rather than "when the database was next touched".
+function attachSubscriptionQuota(profile: ProfileMetadata): ProfileMetadata {
+  const quota = readSubscriptionQuota(profile.id);
+  if (quota === undefined) {
+    return profile;
+  }
+  return { ...profile, subscription: quota };
+}
+
 function listProfiles(): ProfileMetadata[] {
   const rows = settingsDatabase()
     .prepare("SELECT * FROM profiles ORDER BY item_order ASC")
     .all() as unknown as ProfileRow[];
-  return rows.map(profileFromRow);
+  return rows.map((row) => attachSubscriptionQuota(profileFromRow(row)));
 }
 
 function selectedProfileId(): string | null {
@@ -128,7 +263,7 @@ function findProfile(id: string): ProfileMetadata {
   if (row === undefined) {
     throw new Error(`profile not found: ${id}`);
   }
-  return profileFromRow(row);
+  return attachSubscriptionQuota(profileFromRow(row));
 }
 
 // Mirrors the Apple client's ProfileManager.uniqueName: appends " (n)" until
@@ -202,27 +337,65 @@ async function readLimitedResponse(
 // Mirrors libbox's HTTPClient (experimental/libbox/http.go): SetURL turns
 // URL userinfo into a basic Authorization header, and Execute accepts only
 // HTTP 200, reporting other statuses as "HTTP <Status>: <body>".
-async function fetchRemoteContent(remoteUrl: string): Promise<string> {
-  const requestUrl = new URL(remoteUrl);
-  const headers = new Headers({ "User-Agent": userAgent() });
-  if (requestUrl.username !== "" || requestUrl.password !== "") {
-    const credentials = `${decodeURIComponent(requestUrl.username)}:${decodeURIComponent(requestUrl.password)}`;
+async function fetchRemote(requestUrl: URL, userAgentValue: string): Promise<Response> {
+  const url = new URL(requestUrl);
+  const headers = new Headers({ "User-Agent": userAgentValue });
+  if (url.username !== "" || url.password !== "") {
+    const credentials = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`;
     headers.set(
       "Authorization",
       `Basic ${Buffer.from(credentials).toString("base64")}`,
     );
-    requestUrl.username = "";
-    requestUrl.password = "";
+    url.username = "";
+    url.password = "";
   }
-  const response = await fetch(requestUrl, {
+  return await fetch(url, {
     headers,
     signal: AbortSignal.timeout(REMOTE_REQUEST_TIMEOUT_MILLISECONDS),
   });
+}
+
+function describeStatus(response: Response): string {
+  return response.statusText === ""
+    ? String(response.status)
+    : `${response.status} ${response.statusText}`;
+}
+
+export interface RemoteProfileFetch {
+  content: string;
+  quota: SubscriptionQuotaUpdate;
+}
+
+/**
+ * Fetches a remote profile: the body, and whatever quota header came with it.
+ *
+ * The response was always in this function's hands - only the header used to be discarded.
+ *
+ * # The one rule that matters here
+ *
+ * The body from the FIRST request is the profile content, always. Some providers answer a
+ * Clash User-Agent with a different subscription - a different node set, sometimes a
+ * different format entirely - so a compatibility retry must never be allowed to replace it.
+ * A retry exists to read one header, and `querySubscriptionQuota` makes that structural
+ * rather than a convention: it never reads the retry's body, so no retry body is ever in
+ * scope as a value that could be mistaken for content.
+ *
+ * # Why the retry is worth its cost
+ *
+ * Providers that gate the header behind a recognised client are common enough that without
+ * this the quota card would simply never appear for them. Providers that send it to everyone
+ * pay nothing: the retry is skipped when the header parsed, and a non-200 update is not
+ * retried either (the request itself has already failed by then, with its own error).
+ *
+ * A failed retry is not a failed update. The quota was optional before this feature existed
+ * and it stays optional: every failure path in the retry returns `undefined`, which the
+ * caller reads as "keep the last known snapshot".
+ */
+async function fetchRemoteProfile(remoteUrl: string): Promise<RemoteProfileFetch> {
+  const requestUrl = new URL(remoteUrl);
+  const response = await fetchRemote(requestUrl, userAgent());
   if (response.status !== 200) {
-    const status =
-      response.statusText === ""
-        ? String(response.status)
-        : `${response.status} ${response.statusText}`;
+    const status = describeStatus(response);
     let body: string;
     try {
       body = await readLimitedResponse(response, MAXIMUM_REMOTE_ERROR_BYTES);
@@ -233,12 +406,51 @@ async function fetchRemoteContent(remoteUrl: string): Promise<string> {
     }
     throw new Error(`HTTP ${status}: ${body}`);
   }
-  return await readLimitedResponse(response, MAXIMUM_REMOTE_PROFILE_BYTES);
+  const quota = quotaUpdateFromHeaders(response.headers);
+  const content = await readLimitedResponse(response, MAXIMUM_REMOTE_PROFILE_BYTES);
+  if (quota !== undefined) {
+    return { content, quota };
+  }
+  return { content, quota: await querySubscriptionQuota(requestUrl) };
+}
+
+/**
+ * Asks for the quota header under a compatibility User-Agent, without taking the body.
+ *
+ * Returns `undefined` for every failure - a non-200, a transport error, a timeout, and a
+ * success with no usable header all mean the same thing to the caller. The body is cancelled
+ * rather than buffered: at most one chunk is ever read, which is the read that completes the
+ * response headers.
+ */
+async function querySubscriptionQuota(requestUrl: URL): Promise<SubscriptionQuotaUpdate> {
+  for (const compatibilityUserAgent of SUBSCRIPTION_QUOTA_COMPATIBILITY_USER_AGENTS) {
+    let response: Response;
+    try {
+      response = await fetchRemote(requestUrl, compatibilityUserAgent);
+    } catch {
+      continue;
+    }
+    try {
+      if (response.status !== 200) {
+        continue;
+      }
+      const update = quotaUpdateFromHeaders(response.headers);
+      if (update !== undefined) {
+        return update;
+      }
+    } finally {
+      // Never read, only released. Cancelling the stream also releases the connection, so
+      // the retry cannot leave a half-consumed download behind it.
+      await response.body?.cancel().catch(() => {});
+    }
+  }
+  return undefined;
 }
 
 async function insertProfile(
   profile: ProfileMetadata,
   content: string,
+  quota: SubscriptionQuotaUpdate,
 ): Promise<ProfileMetadata> {
   await atomicWriteFile(contentPath(profile.id), content);
   const store = settingsDatabase();
@@ -270,6 +482,11 @@ async function insertProfile(
       );
     writeSelectedProfileId(profile.id);
   })();
+  // Outside the profile transaction on purpose: `applySubscriptionQuota` owns its own
+  // statement, and nesting it would make the quota's write depend on the profile's rollback
+  // path for no benefit - a missing quota row is a valid state, an orphan is not, and this
+  // runs after the row it references exists.
+  applySubscriptionQuota(profile.id, quota);
   notifyChanged();
   reconfigureAutoUpdate();
   return profile;
@@ -305,6 +522,10 @@ async function importProfileData(
         lastUpdated,
       },
       content.config,
+      // A shared profile file carries the subscription CONTENT and its own lastUpdated, but
+      // no quota fields - the format has no place to put them. So an imported remote profile
+      // starts with no quota and picks one up on its next update.
+      undefined,
     );
     return;
   }
@@ -365,24 +586,41 @@ function updateRemoteProfile(id: string): Promise<void> {
     if (profile.type !== "remote" || !profile.remoteUrl) {
       throw new Error("not a remote profile");
     }
-    const remoteContent = await fetchRemoteContent(profile.remoteUrl);
-    await checkConfig(remoteContent);
+    const remote = await fetchRemoteProfile(profile.remoteUrl);
+    // Validation runs BEFORE anything is committed, and it is the only gate. A provider that
+    // answers HTTP 200 with a valid-looking quota header and an error page for a body must
+    // leave the profile exactly as it was: a quota snapshot persisted first would be a
+    // freshness claim about an update that then failed.
+    await checkConfig(remote.content);
+    const store = settingsDatabase();
     try {
       const oldContent = await readFile(contentPath(profile.id), "utf-8");
-      if (oldContent !== remoteContent) {
-        await atomicWriteFile(contentPath(profile.id), remoteContent);
+      if (oldContent !== remote.content) {
+        await atomicWriteFile(contentPath(profile.id), remote.content);
         await reloadIfSelectedAndRunning(profile.id);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
       }
-      await atomicWriteFile(contentPath(profile.id), remoteContent);
+      await atomicWriteFile(contentPath(profile.id), remote.content);
       await reloadIfSelectedAndRunning(profile.id);
     }
-    settingsDatabase()
+    store
       .prepare("UPDATE profiles SET last_updated = ? WHERE id = ?")
       .run(Date.now(), profile.id);
+    // Deliberately OUTSIDE the `oldContent !== remote.content` branch above, and after the
+    // content write rather than before it.
+    //
+    // Outside it, because the two move independently in practice: a subscription whose node
+    // list has not changed still consumes traffic, so `body unchanged` is the NORMAL case for
+    // a quota that did change. Gating this on the body would freeze the quota for every
+    // stable subscription.
+    //
+    // After it, because the commit order is the one the user can be wrong about. If the body
+    // write throws, no quota timestamp is advanced and the card keeps saying when the last
+    // SUCCESSFUL update happened.
+    applySubscriptionQuota(profile.id, remote.quota);
     notifyChanged();
   });
 }
@@ -471,33 +709,49 @@ const handlers: Record<
         init.autoUpdateIntervalMinutes ?? DEFAULT_UPDATE_INTERVAL_MINUTES,
     };
     let content: string;
+    let quota: SubscriptionQuotaUpdate;
     if (init.type === "remote") {
       if (!init.remoteUrl) {
         throw new Error("missing remote URL");
       }
       profile.remoteUrl = init.remoteUrl;
-      content = await fetchRemoteContent(init.remoteUrl);
+      const remote = await fetchRemoteProfile(init.remoteUrl);
+      content = remote.content;
+      quota = remote.quota;
       await checkConfig(content);
       profile.lastUpdated = Date.now();
     } else {
       content = init.content ?? "{}";
+      // A local profile has no remote account, so it never has a quota. `null` rather than
+      // `undefined` would delete a row this profile cannot have; `undefined` is "no change",
+      // which for a brand new profile is the same thing and says less about intent, so the
+      // empty case is left to fall out of the table having no row.
+      quota = undefined;
       if (init.content !== undefined) {
         await checkConfig(content);
       }
     }
-    return await insertProfile(profile, content);
+    return await insertProfile(profile, content, quota);
   },
 
   async updateMetadata(id: string, patch: ProfileMetadataPatch): Promise<void> {
     await runProfileOperation(id, async () => {
       const profile = findProfile(id);
       let remoteContent: string | null = null;
-      if (
+      let quota: SubscriptionQuotaUpdate;
+      // `remoteUrl` pointing somewhere else means a different subscription account, so the
+      // snapshot on file is about an account this profile no longer follows. Clearing it is
+      // the whole of the URL-change rule: the card goes quiet until the new URL reports its
+      // own numbers, rather than presenting the old provider's remaining traffic as this
+      // one's.
+      const remoteUrlChanged =
         patch.remoteUrl !== undefined &&
         profile.type === "remote" &&
-        patch.remoteUrl !== profile.remoteUrl
-      ) {
-        remoteContent = await fetchRemoteContent(patch.remoteUrl);
+        patch.remoteUrl !== profile.remoteUrl;
+      if (remoteUrlChanged) {
+        const remote = await fetchRemoteProfile(patch.remoteUrl as string);
+        remoteContent = remote.content;
+        quota = remote.quota ?? { quota: null };
         await checkConfig(remoteContent);
         await atomicWriteFile(contentPath(id), remoteContent);
       }
@@ -540,6 +794,12 @@ const handlers: Record<
             );
         }
       })();
+      if (remoteUrlChanged) {
+        // The new URL reported a header: its snapshot is now authoritative. It reported
+        // none: the previous account's snapshot is removed and nothing replaces it, so the
+        // UI shows no quota at all rather than another subscription's.
+        applySubscriptionQuota(id, quota);
+      }
       notifyChanged();
       reconfigureAutoUpdate();
       if (remoteContent !== null) {
@@ -554,6 +814,13 @@ const handlers: Record<
       const store = settingsDatabase();
       store.transaction(() => {
         store.prepare("DELETE FROM profiles WHERE id = ?").run(id);
+        // In the same transaction as the profile row, so a quota snapshot cannot outlive
+        // its profile. Without this the table accumulates rows nothing will ever read,
+        // update or delete - and a future profile that happened to reuse the id (it cannot
+        // today, ids are UUIDs) would silently inherit a stranger's traffic figures.
+        store
+          .prepare("DELETE FROM profile_subscription_quota WHERE profile_id = ?")
+          .run(id);
         if (selectedProfileId() === id) {
           const firstRow = store
             .prepare("SELECT id FROM profiles ORDER BY item_order ASC LIMIT 1")
