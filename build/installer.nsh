@@ -28,6 +28,12 @@ SetFont "Segoe UI" 9
 # identity.ts spells it so the two can be compared as text - which is the only check
 # available between NSIS and TypeScript.
 !define INSTALLATION_LAYOUT_REGISTRY_KEY "SOFTWARE\Jiejiebox\jiejiebox"
+# The layout key a version of this fork that predates its own daemon identity wrote. Used
+# ONLY to recognise "the installation being replaced is one of ours, and it registered its
+# service under the upstream client's name" - the upstream client never writes this key, so
+# its presence distinguishes our previous version from a genuine upstream installation.
+# See installer-remove-legacy-service.ps1.
+!define LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY "SOFTWARE\SagerNet\sing-box"
 !define DAEMON_DATA_DIRECTORY_NAME "jiejiebox-daemon"
 !define INSTALLER_STATE_DIRECTORY_NAME "jiejiebox-installer"
 !define DEFINE_SERVICE_NAME "jiejiebox-daemon"
@@ -692,6 +698,15 @@ FunctionEnd
   LangString removingData ${LANG_TRADCHINESE} "正在移除 sing-box 資料..."
   LangString removingData ${LANG_FARSI} "در حال حذف داده‌های sing-box..."
   LangString removingData ${LANG_RUSSIAN} "Удаление данных sing-box..."
+
+  # Reported when the previous version's daemon service could not be removed. Not fatal -
+  # the installation has its own service under its own name - but the user should know an
+  # obsolete service may still be listed under the upstream client's name.
+  LangString legacyServiceCleanupFailed ${LANG_ENGLISH} "Could not remove the service registered by a previous version; it may still appear as 'sing-box-daemon'."
+  LangString legacyServiceCleanupFailed ${LANG_SIMPCHINESE} "无法移除旧版本注册的服务；它可能仍以 'sing-box-daemon' 名称存在。"
+  LangString legacyServiceCleanupFailed ${LANG_TRADCHINESE} "無法移除舊版本註冊的服務；它可能仍以 'sing-box-daemon' 名稱存在。"
+  LangString legacyServiceCleanupFailed ${LANG_FARSI} "حذف سرویس ثبت‌شده توسط نسخهٔ قبلی ممکن نشد؛ ممکن است هنوز با نام 'sing-box-daemon' دیده شود."
+  LangString legacyServiceCleanupFailed ${LANG_RUSSIAN} "Не удалось удалить службу, зарегистрированную предыдущей версией; она может остаться под именем 'sing-box-daemon'."
 !macroend
 
 !macro setInstallationLayoutRegistryView
@@ -948,6 +963,7 @@ FunctionEnd
   File /oname=$PLUGINSDIR\installer-preflight.ps1 "${BUILD_RESOURCES_DIR}\installer-preflight.ps1"
   File /oname=$PLUGINSDIR\installer-service.ps1 "${BUILD_RESOURCES_DIR}\installer-service.ps1"
   File /oname=$PLUGINSDIR\installer-stop-service.ps1 "${BUILD_RESOURCES_DIR}\installer-stop-service.ps1"
+  File /oname=$PLUGINSDIR\installer-remove-legacy-service.ps1 "${BUILD_RESOURCES_DIR}\installer-remove-legacy-service.ps1"
   File /oname=$PLUGINSDIR\installer-data.ps1 "${BUILD_RESOURCES_DIR}\installer-data.ps1"
   ${if} ${FileExists} "$dataTransitionStatePath"
     nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-data.ps1" -Operation Recover -StatePath "$dataTransitionStatePath"'
@@ -1726,6 +1742,25 @@ FunctionEnd
   ${if} $1 != 0
     Abort "$(stopServiceFailed)"
   ${endif}
+  # A version of this fork that predates its own daemon identity registered its service
+  # under the UPSTREAM client's name. That service is neither ours to keep nor ours to
+  # leave: `service uninstall` in the new daemon removes only `jiejiebox-daemon`, so without
+  # this step the old service survives the upgrade pointing at a binary the upgrade has just
+  # replaced, fails at every boot, and cannot be started by the SCM.
+  #
+  # Guarded on the PREVIOUS layout key, which only this fork's pre-identity installer wrote -
+  # so on a machine that also has the upstream client installed, its daemon and its service
+  # are left completely alone. See installer-remove-legacy-service.ps1, which also refuses a
+  # service whose binary is outside the tree being installed.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-remove-legacy-service.ps1" -LegacyLayoutRegistryKey "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" -InstallationDirectory "$INSTDIR"'
+  Pop $1
+  ${if} $1 != 0
+    # Not fatal, and deliberately not an Abort: the service this installer is about to
+    # register is a different one, so a failure here leaves the new installation working and
+    # only the obsolete service behind. Failing the install would trade a cosmetic leftover
+    # for a broken product.
+    DetailPrint "$(legacyServiceCleanupFailed)"
+  ${endif}
   StrCpy $2 0
   ${if} $reinstallExistingInstallation == 1
     StrCpy $2 1
@@ -1959,11 +1994,19 @@ FunctionEnd
       ${if} $1 != 0
         Abort "$(preflightFailed)"
       ${endif}
-      ${if} $applicationDataDirectory == ""
-        SetShellVarContext current
-        RMDir /r "$APPDATA\sing-box"
-        SetShellVarContext all
-      ${endif}
+      # No remove-data fallback for the application data directory, deliberately.
+      #
+      # This used to be `RMDir /r "$APPDATA\sing-box"` - the UPSTREAM client's directory, which
+      # this client no longer uses. An uninstall that removes data must remove this
+      # installation's data, and "the layout says nothing, so delete the other product's
+      # folder" is the opposite of that: it is the one destructive path in the whole installer
+      # that could reach into an installation it does not own.
+      #
+      # Nothing is lost by leaving it to the branch above. When the layout names a directory,
+      # the preflight deletes it with the installation-id check. When it does not name one,
+      # this installation never created one - the installer always writes
+      # ApplicationDataDirectory, or leaves the value absent to mean "the default", and the
+      # runtime's default is %APPDATA%\jiejiebox, which no uninstall should ever guess at.
       !insertmacro setInstallationLayoutRegistryView
       DeleteRegKey HKLM "${INSTALLATION_LAYOUT_REGISTRY_KEY}"
       !insertmacro restoreInstallerRegistryView
