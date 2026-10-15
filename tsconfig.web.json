@@ -22,5 +22,15 @@
       "@shared/*": ["./src/shared/*"]
     }
   },
-  "include": ["src/renderer/src", "src/shared", "dashboard/src"]
+  "include": ["src/renderer/src", "src/shared", "dashboard/src"],
+  "//exclude": [
+    "`src/shared` is in this project because the renderer imports the IPC types from it, and",
+    "the dashboard's own `*.test.ts` files come in with `dashboard/src`. Both are EXCLUDED",
+    "here: they run under vitest or `node --test`, they need test globals and Node types that",
+    "must not be in scope for browser code, and they are checked by tsconfig.test.json (the",
+    "desktop shell's) and by the dashboard's own vitest run. Without this, adding one test file",
+    "under src/shared makes `tsc -b` report the absence of Node's types in the web project -",
+    "which is a true statement about a file that does not belong to the web project."
+  ],
+  "exclude": ["src/**/*.test.ts", "dashboard/src/**/*.test.ts"]
 }

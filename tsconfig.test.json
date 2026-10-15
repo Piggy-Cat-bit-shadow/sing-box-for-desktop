@@ -1,0 +1,24 @@
+{
+  "//": [
+    "Type checking for the desktop client's tests, which run under `node --test`.",
+    "They need Node's types (node:test, node:sqlite, Buffer) and the web project must not",
+    "have them - adding `types: [node]` there would put Node globals in scope for the",
+    "renderer and the dashboard, which is a silent way to let browser code depend on APIs",
+    "that do not exist in a browser. So the tests are excluded from both existing projects",
+    "and checked here instead, through `tsc -b`.",
+    "`allowImportingTsExtensions` because a test imports the module under test by its real",
+    "path with its extension - that is what Node's resolver requires, and it is what the",
+    "test loader would otherwise have to paper over."
+  ],
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "composite": false,
+    "emitDeclarationOnly": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "tsBuildInfoFile": "./node_modules/.tsbuild/test/tsconfig.test.tsbuildinfo"
+  },
+  "include": ["src/**/*.test.ts"],
+  "//exclude": "reset, because `exclude` is inherited and would otherwise exclude the very files this project exists for",
+  "exclude": []
+}

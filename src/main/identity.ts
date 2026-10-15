@@ -73,6 +73,18 @@ export const applicationExecutableName = "sing-box.exe";
 // notification attribution, so it has to match electron-builder's `win.appId`. It is not
 // decorative: two clients sharing it would group into one taskbar button and overwrite
 // each other's notification registration.
+//
+// It is also the LOGIN ITEM's identity, which is worth recording because it is not obvious.
+// Electron documents `setLoginItemSettings`'s `name` option as "value name to write into
+// registry. Defaults to the app's AppUserModelId()" (`interface Settings` in electron.d.ts),
+// and `loginItem.ts` passes no `name` - so the Run entry, the Task Manager startup entry and
+// the `StartupApproved` entry are all keyed by this value. Changing the AUMID therefore
+// isolates the login item as well, with no edit to loginItem.ts and nothing to migrate:
+// `migrateLoginItem` reads and writes only this client's own entry, so it can neither see nor
+// close the upstream client's startup item.
+//
+// (macOS and Linux take other paths - `SMAppService`/Login Items, and an XDG autostart file -
+// and are out of scope for this Windows change.)
 export const applicationUserModelId = `io.github.piggycatbitshadow.${applicationIdentity}`;
 
 // The shell verb the installer registers under

@@ -39,6 +39,7 @@
     "package:linux:rpm": "tsx scripts/package.ts linux rpm",
     "package:linux:pacman": "tsx scripts/package.ts linux pacman",
     "postinstall": "electron-builder install-app-deps",
+    "test": "node --import ./scripts/test-loader.mjs --test \"src/**/*.test.ts\"",
     "typecheck": "tsc -b"
   },
   "devDependencies": {

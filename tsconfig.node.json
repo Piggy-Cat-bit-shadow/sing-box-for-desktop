@@ -27,5 +27,6 @@
     "src/preload",
     "src/shared",
     "dashboard/src/lib/taildrop.ts"
-  ]
+  ],
+  "exclude": ["src/**/*.test.ts"]
 }

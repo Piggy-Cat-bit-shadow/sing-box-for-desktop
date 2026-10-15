@@ -11,20 +11,65 @@
  */
 
 /**
- * A parsed quota snapshot. Every field is optional: providers omit fields, and each one is
- * independent of the others.
+ * A quota snapshot as it is STORED and carried on the profile: the raw facts a provider
+ * reported, plus when they arrived.
  *
- * These are the RAW facts the server reported. `used`, `remaining`, percentages and
- * formatted text are all derivable and are therefore not stored - a persisted derived value
- * is a value that can disagree with its inputs after a partial update.
+ * One type rather than a parsed shape plus a stored shape, because they are the same object
+ * on the wire - `ProfileMetadata.subscription` is the row - and a second declaration would be
+ * a second thing to keep in step. Only `updatedAt` is not the provider's: the parser cannot
+ * know it, so the caller stamps it.
+ *
+ * These are the RAW facts. `used`, `remaining`, percentages and formatted text are all
+ * derivable and are therefore not stored - a persisted derived value is a value that can be
+ * left disagreeing with its inputs after a partial update.
  */
 export interface SubscriptionQuota {
+  /** Bytes uploaded, as the provider reported them. */
   upload?: number;
+  /** Bytes downloaded, as the provider reported them. */
   download?: number;
+  /** Quota total in bytes. Absent when the provider sells no fixed quota. */
   total?: number;
   /** Unix timestamp in SECONDS, exactly as the header carries it. */
   expire?: number;
+  /**
+   * When this snapshot arrived, in milliseconds.
+   *
+   * Separate from `ProfileMetadata.lastUpdated` on purpose. That one says when the profile
+   * CONTENT was last refreshed; a provider can stop sending the header at any time, so the
+   * content can be a minute old while the quota is a week old. Showing one as the other
+   * would present stale traffic figures as current.
+   */
+  updatedAt: number;
 }
+
+/** What `parseSubscriptionUserInfo` produces: the provider's fields, with no timestamp yet. */
+export type ParsedSubscriptionQuota = Omit<SubscriptionQuota, "updatedAt">;
+
+/**
+ * The quota change a fetch produced - the state machine, as one type.
+ *
+ * It is declared here, next to the snapshot it describes, and not in either of the two places
+ * that consume it: `subscriptionFetch` produces one and `subscriptionStorage` applies one, and
+ * `shared/` must not import from `main/` (the renderer bundles `shared/`, and `main/` pulls in
+ * Node and Electron). So the type lives where both sides can name it, and the alternative -
+ * two structurally identical declarations - would be two things to keep in step.
+ *
+ *   `undefined`            the provider sent no header. Keep the last known snapshot and
+ *                          leave its `updatedAt` alone, so the UI can say how old it is
+ *                          instead of showing an empty card.
+ *   `{ quota: {...} }`     the provider sent a header. AUTHORITATIVE: fields it left out are
+ *                          cleared rather than inherited from the previous snapshot, so an
+ *                          old `expire` cannot attach itself to a new `total`, and
+ *                          `updatedAt` moves to now.
+ *   `{ quota: null }`      the snapshot is gone - the profile's URL changed, so the old
+ *                          account's quota is not this subscription's.
+ *
+ * The distinction between the first and second is the one that is easiest to get subtly
+ * wrong and hardest to notice: the wrong way round produces a card that is either permanently
+ * stale or permanently empty, and both look like "the provider did something".
+ */
+export type SubscriptionQuotaUpdate = { quota: SubscriptionQuota | null } | undefined;
 
 /**
  * Largest number accepted from the header.
@@ -75,11 +120,11 @@ function parseQuotaValue(raw: string): number | undefined {
  */
 export function parseSubscriptionUserInfo(
   header: string | null | undefined,
-): SubscriptionQuota | undefined {
+): ParsedSubscriptionQuota | undefined {
   if (header === null || header === undefined) {
     return undefined;
   }
-  const quota: SubscriptionQuota = {};
+  const quota: ParsedSubscriptionQuota = {};
   for (const segment of header.split(";")) {
     const separator = segment.indexOf("=");
     if (separator === -1) {
@@ -112,7 +157,7 @@ export function parseSubscriptionUserInfo(
 }
 
 /** Whether a parsed snapshot carries at least one usable fact. */
-export function hasSubscriptionQuota(quota: SubscriptionQuota | undefined): boolean {
+export function hasSubscriptionQuota(quota: ParsedSubscriptionQuota | undefined): boolean {
   return (
     quota !== undefined &&
     (quota.upload !== undefined ||
@@ -155,7 +200,7 @@ export const SUBSCRIPTION_QUOTA_COMPATIBILITY_USER_AGENTS = ["clash.meta", "clas
  */
 export function shouldRetryForSubscriptionQuota(
   responseOk: boolean,
-  quota: SubscriptionQuota | undefined,
+  quota: ParsedSubscriptionQuota | undefined,
 ): boolean {
   return responseOk && quota === undefined;
 }

@@ -124,34 +124,21 @@ export type ProfileType = "local" | "remote";
 /**
  * The last subscription quota snapshot a remote profile's provider reported.
  *
- * Optional and remote-only, which is why it is one object rather than four more fields on
- * `ProfileMetadata`: a local profile and a remote profile whose provider never sends the
- * header both simply have no `subscription`, and nothing downstream has to distinguish
- * "zero" from "absent" four separate times.
+ * Re-exported from where it is STORED rather than restated here. The wire shape and the row
+ * shape are the same object - there is no translation layer - so a second declaration would
+ * be a second thing to keep in step, and the failure mode of them drifting is a field that
+ * silently exists on one side only.
  *
- * These are the numbers the server sent, unmodified. `used`, `remaining`, percentages and
- * formatted text are derived by whoever displays them, because a stored derived value is a
- * value that can be left disagreeing with its inputs.
+ * It lives on this side of the `shared` boundary because the persistence statements need it
+ * and the dashboard mirrors it in `DesktopProfileSubscription`, which is the transport shape
+ * seen from the other workspace. `import type` in subscriptionStorage.ts keeps `node:sqlite`
+ * out of the dashboard's dependency graph.
  */
-export interface ProfileSubscriptionQuota {
-  /** Bytes uploaded, as the provider reported them. */
-  upload?: number;
-  /** Bytes downloaded, as the provider reported them. */
-  download?: number;
-  /** Quota total in bytes. Absent when the provider does not sell a fixed quota. */
-  total?: number;
-  /** Unix timestamp in SECONDS. The UI multiplies by 1000 to format it. */
-  expire?: number;
-  /**
-   * When this snapshot arrived, in milliseconds.
-   *
-   * Separate from `ProfileMetadata.lastUpdated` on purpose. That one says when the profile
-   * CONTENT was last refreshed; a provider can stop sending the header at any time, so the
-   * content can be a minute old while the quota is a week old. Showing one as the other
-   * would present stale traffic figures as current.
-   */
-  updatedAt: number;
-}
+// Imported for use below AND re-exported, because `export type { X } from "..."` is a pure
+// re-export: it binds nothing locally, so `ProfileMetadata` could not name it.
+import type { SubscriptionQuota as ProfileSubscriptionQuota } from "./subscription";
+
+export type { ProfileSubscriptionQuota };
 
 export interface ProfileMetadata {
   id: string;

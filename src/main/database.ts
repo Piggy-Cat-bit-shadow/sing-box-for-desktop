@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { subscriptionQuotaSchema } from "./subscriptionStorage";
+
 interface PreferenceRow {
   name: string;
   data: Uint8Array;
@@ -162,33 +164,9 @@ function createSchema(store: SettingsDatabase): void {
 }
 
 // The newest table in this schema, and the reason it is a TABLE and not five columns on
-// `profiles`.
-//
-// There is no schema-version table and no ALTER-based migration here: `createSchema` is
-// `CREATE TABLE IF NOT EXISTS` and nothing else. That is safe for a new table - an existing
-// settings.db simply gains it - and it is NOT safe for new columns, because
-// `CREATE TABLE IF NOT EXISTS profiles (...)` is a no-op on a database that already has a
-// `profiles` table. Adding columns there would work on a fresh install, work in CI, and fail
-// on every real upgrade with `no such column` - and only when something first tried to write
-// a quota.
-//
-// A separate table also says the right thing about the data: the quota is OPTIONAL metadata
-// about a REMOTE subscription, not a property of a profile. A local profile has no row here,
-// and neither does a remote profile whose provider never sent the header.
-//
-// There is deliberately no foreign key. `PRAGMA foreign_keys` is off by default and this
-// class never turns it on, so declaring one would produce a constraint that is documented
-// but not enforced; the profile's removal deletes this row in the same transaction instead.
-const subscriptionSchema = `
-    CREATE TABLE IF NOT EXISTS profile_subscription_quota (
-      profile_id TEXT PRIMARY KEY,
-      upload INTEGER,
-      download INTEGER,
-      total INTEGER,
-      expire INTEGER,
-      updated_at INTEGER NOT NULL
-    );`;
-
+// `profiles`, live with its own SQL in subscriptionStorage.ts - which is also where the
+// upgrade argument is written down, and where the statements are exercised against a real
+// pre-upgrade database (subscriptionStorage.test.ts).
 export function settingsDatabase(): SettingsDatabase {
   if (database !== null) {
     return database;
@@ -200,7 +178,7 @@ export function settingsDatabase(): SettingsDatabase {
   try {
     store.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
     createSchema(store);
-    store.exec(subscriptionSchema);
+    store.exec(subscriptionQuotaSchema);
     migrateLegacyEncryptedStrings(store);
   } catch (error) {
     store.close();
