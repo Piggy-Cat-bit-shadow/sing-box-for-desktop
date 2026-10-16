@@ -1082,6 +1082,10 @@ FunctionEnd
   # adoption exists to prevent - "The application data directory must be empty." - would look
   # like a directory problem rather than an adoption that did not happen.
   !insertmacro ciDiagnostic "customInit" "layout=$hasInstallationLayout adoptedLegacy=$legacyApplicationDataAdopted appData=$applicationDataDirectory daemonData=$daemonDataDirectory"
+  # The identity the preflight will be asked to accept. It is recorded because an adoption that
+  # refused and an adoption that never ran produce the same message otherwise, and this is the one
+  # value the refusal depends on that the log did not carry.
+  !insertmacro ciDiagnostic "customInit" "installationID=$installationID"
   ReadRegStr $0 HKLM "${INSTALL_REGISTRY_KEY}" "InstallLocation"
   ${if} $0 != ""
     StrCpy $hasExistingInstallation 1

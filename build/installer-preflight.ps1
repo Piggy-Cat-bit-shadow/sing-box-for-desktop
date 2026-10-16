@@ -567,6 +567,63 @@ function Remove-WorkingDirectoryTree([string]$Path) {
     [System.IO.Directory]::Delete($item.FullName)
 }
 
+# Brings an existing daemon working directory up to the protection the daemon itself creates it
+# with, instead of aborting the installation over it.
+#
+# # Why this exists
+#
+# The blocks below require the daemon working directory to be owned by SYSTEM, to have inheritance
+# disabled, and to carry exactly SYSTEM, Administrators and the daemon's service SID. These are
+# the properties experimental/boxdd's `ensureWindowsWorkingDirectory` creates the directory with,
+# from the descriptor `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;<service SID>)`.
+#
+# The daemon REPAIRS a directory that does not match - `validateRepairableWindowsWorkingDirectory`
+# then `secureWindowsWorkingDirectoryRoot` - so an existing directory with an ordinary inherited
+# ACL is a normal arrangement that resolves itself the first time the service starts.
+#
+# The installer could not get that far. It validated strictly, found the directory owned by
+# BUILTIN\Administrators (which is what [System.IO.Directory]::CreateDirectory inherits from
+# %ProgramData%, and what the previous release line left behind), and stopped with exit 21 - before
+# any application file was installed and before the daemon that would have repaired it could ever
+# run. The only repair the preflight had was `-ResetWorkingDirectory`, which DELETES the directory,
+# and which the install path never reaches: the preflight runs before the installation exists.
+#
+# So the installer now applies the same protection the daemon would, and the daemon's own check
+# still runs afterwards - it validates the result independently, and will stop with an error if
+# this did not produce something it can use.
+function Set-DaemonWorkingDirectoryAccessControl([string]$Path) {
+    $system = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $administrators = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    $service = [System.Security.Principal.SecurityIdentifier]::new((Get-ServiceSid $daemonServiceName))
+
+    # The owner is set with icacls rather than through DirectorySecurity.SetOwner: taking ownership
+    # is a privilege operation, and Set-Acl cannot express it for an identity that is not already
+    # the caller. icacls is the same tool the application data directory's own protection uses.
+    & "$env:SystemRoot\System32\icacls.exe" $Path /setowner "*S-1-5-18" /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not set the daemon working directory owner: $LASTEXITCODE"
+    }
+
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $accessControl = [System.Security.AccessControl.DirectorySecurity]::new()
+    # A fresh DirectorySecurity carries no owner. It is read back from the directory after icacls
+    # has taken it, so the block below does not undo it.
+    $accessControl.SetOwner((Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]))
+    $accessControl.SetAccessRuleProtection($true, $false)
+    foreach ($identity in @($system, $administrators, $service)) {
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$accessControl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $accessControl
+}
+
 function Set-ApplicationDataDirectoryAccessControl([string]$Path) {
     $system = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
     $administrators = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
@@ -879,6 +936,39 @@ try {
         Select-Object -First 1
     if ($null -ne $workingReparsePoint) {
         Exit-Installer 20
+    }
+
+    # An existing daemon working directory that is not protected the way the daemon protects it is
+    # repaired here rather than refused. See Set-DaemonWorkingDirectoryAccessControl for why the
+    # strict check below cannot be the end of it: the daemon repairs such a directory itself, but
+    # it cannot run until the installation succeeds, and the installation was stopping right here.
+    #
+    # The repair runs BEFORE the checks and its result is re-read from the directory, so a repair
+    # that did not achieve the required state still fails those checks with the same codes. Only a
+    # directory that is already protected is left alone; the ACL is rewritten only when it needs to
+    # be, so an ordinary upgrade does not churn a correct ACL.
+    $workingAccessControl = Get-Acl -LiteralPath $workingDirectory
+    $workingOwner = $workingAccessControl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    $workingServiceSid = Get-ServiceSid $daemonServiceName
+    $workingRuleIdentities = @(
+        $workingAccessControl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) |
+            ForEach-Object { $_.IdentityReference.Value }
+    )
+    $workingNeedsRepair = $workingOwner -ne "S-1-5-18" -or
+        -not $workingAccessControl.AreAccessRulesProtected -or
+        ($workingRuleIdentities -notcontains "S-1-5-18") -or
+        ($workingRuleIdentities -notcontains "S-1-5-32-544") -or
+        ($workingRuleIdentities -notcontains $workingServiceSid)
+    if ($workingNeedsRepair) {
+        Write-InstallerOutput ("repairing the daemon working directory: owner={0} protected={1} identities={2}" -f `
+            $workingOwner, $workingAccessControl.AreAccessRulesProtected, ($workingRuleIdentities -join ','))
+        try {
+            Set-DaemonWorkingDirectoryAccessControl $workingDirectory
+        } catch {
+            # A repair that could not be performed leaves the original failure to be reported by
+            # the checks below, with the codes the installer already knows how to act on.
+            Write-InstallerOutput "Could not repair the daemon working directory: $($_.Exception.Message)"
+        }
     }
 
     $expectedIdentities = @{
