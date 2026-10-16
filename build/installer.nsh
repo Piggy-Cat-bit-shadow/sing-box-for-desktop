@@ -835,7 +835,9 @@ FunctionEnd
     !insertmacro setInstallationLayoutRegistryView
     ReadRegDWORD $R0 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "LayoutVersion"
     ReadRegStr $R1 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "ApplicationDataDirectory"
-    ReadRegStr $R2 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "DaemonDataDirectory"
+    # `DaemonDataDirectory` is deliberately NOT read: the daemon data directory is the one thing the
+    # two clients cannot share - its ACL names each client's own service SID - so this client never
+    # adopts the other one's and never steers its migration at it. See the adoption block below.
     # Read into a scratch register, NOT into $installationID. That register is this installation's
     # own identity, and it is written into the marker of every directory this client re-owns: two
     # clients that share one marker value cannot tell each other's data apart, which is the whole
@@ -854,11 +856,20 @@ FunctionEnd
       ${StrContains} $3 "$INSTDIR" $R1
       ${if} $0 == ""
       ${andif} $3 == ""
-        # The daemon's directory is adopted only when it is a real path of its own; otherwise the
-        # default is kept rather than cleared.
-        ${if} $R2 != ""
-          StrCpy $daemonDataDirectory $R2
-        ${endif}
+        # The application data directory is adopted; the DAEMON data directory is deliberately NOT.
+        #
+        # It used to be taken from the legacy record as well, and that directory is the one place
+        # the two clients cannot share: the daemon's working directory carries an ACL naming its own
+        # service SID, and each client's check requires ITS OWN SID to be present. Whoever secures it
+        # second leaves the other one unable to start -
+        #
+        #     FATAL install service: secure working directory:
+        #     daemon working directory is missing a required access control entry
+        #
+        # which is what happened to the upstream client once this installer had adopted and
+        # re-secured `%ProgramData%\sing-box-daemon`. The daemon directory holds no user data (the
+        # profiles live in the application data directory), so this client takes its own
+        # `%ProgramData%\jiejiebox-daemon` and leaves the other client's directory alone.
         StrCpy $applicationDataDirectory $R1
         # Adoption can leave the "previous" directory equal to this one, because the record being
         # adopted names the directory this installation is about to re-own - the data does not move.
@@ -873,9 +884,9 @@ FunctionEnd
         # keeps that state honest: when the two differ the transition migrates, and when they are
         # the same there is nothing to move.
         StrCpy $previousApplicationDataDirectory $R1
-        ${if} $R2 != ""
-          StrCpy $previousDaemonDataDirectory $R2
-        ${endif}
+        # The daemon directory is not adopted and not steered at the legacy path, in either
+        # direction: this client keeps its own, and `$previousDaemonDataDirectory` is left equal to
+        # it below, so the transition neither guards against nor copies the other client's.
         StrCpy $hasExistingInstallation 1
         StrCpy $legacyApplicationDataAdopted 1
       ${else}

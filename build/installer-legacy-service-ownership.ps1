@@ -48,6 +48,15 @@ function Get-JiejieboxLegacyOwnershipDecision {
         # Injected so the decision can be tested without a machine. Both default to the real
         # filesystem, and neither is called when an earlier signal has already failed.
         [scriptblock]$TestPath = { param($p) Test-Path -LiteralPath $p -PathType Leaf },
+        # Reads the product identity out of an installed executable's version resources. Injected so
+        # the decision can be tested without real binaries; the default reads the real file.
+        [scriptblock]$GetProductName = {
+            param($p)
+            try {
+                if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return "" }
+                return [string](Get-Item -LiteralPath $p).VersionInfo.ProductName
+            } catch { return "" }
+        },
         [scriptblock]$TestFixedVolume = {
             param($p)
             try {
@@ -154,6 +163,42 @@ function Get-JiejieboxLegacyOwnershipDecision {
         }
     }
 
+    # # The signal that actually separates the two clients
+    #
+    # Everything above is a SHAPE check, and the upstream client has the same shape: same service
+    # name, same `resources\daemon\sing-box-daemon.exe` layout, same marker file in a shared
+    # application data directory. That was measured, not assumed - the upstream client writes
+    # `.access-control` too, and `HKLM\SOFTWARE\SagerNet\sing-box` carries an `InstallationID` for
+    # both. So `HasOwnershipMarker` was NOT proof that the service was ours, and acting on it broke
+    # the other product: this script reported the upstream client's own binary as proof and deleted
+    # its service.
+    #
+    # The product name in the installed executable's version resources is not shared. This fork's
+    # build stamps its own `sing-box.exe` with `ProductName = "Jiejiebox"`; the upstream client's is
+    # `"sing-box"`. It is read from the tree the SERVICE points at, so it describes the product that
+    # actually owns the service, and it depends on nothing in the registry, on any user's profile,
+    # or on which client installed last.
+    #
+    # The check is on the application executable, not on the daemon: neither client stamps a product
+    # name onto `sing-box-daemon.exe`, so that file cannot answer the question.
+    $applicationIdentifier = "Jiejiebox"
+    $applicationExecutable = Join-Path $root "sing-box.exe"
+    $productName = [string](& $GetProductName $applicationExecutable)
+    if ($productName -ine $applicationIdentifier) {
+        $detail = if ([string]::IsNullOrWhiteSpace($productName)) {
+            "it declares no product name"
+        } else {
+            "it declares '$productName'"
+        }
+        return [PSCustomObject]@{
+            CanRemove = $false
+            Reason    = "the tree the '$ServiceName' service points at is not a Jiejiebox installation: $applicationExecutable $detail"
+            ImagePath = $image
+            Root      = $root
+            ProofPath = ""
+        }
+    }
+
     $proofPath = ""
     foreach ($candidate in $candidateProofPaths) {
         if (& $TestPath $candidate) { $proofPath = $candidate; break }
@@ -163,9 +208,13 @@ function Get-JiejieboxLegacyOwnershipDecision {
         # operator on the next line and formats nothing, which is how this message first
         # rendered its own placeholder to the user.
         $checked = if ($candidateProofPaths.Count -eq 0) { "nothing" } else { $candidateProofPaths -join "', '" }
+        # This used to claim "the upstream client does not" write the marker. That claim was false -
+        # the upstream client writes the same file - which is why it is no longer made. The product
+        # name above is what separates the two; this message covers the case where the tree IS ours
+        # but carries no marker.
         $missing = ("no Jiejiebox ownership proof at '{0}': a previous version of this fork " +
-            "writes that marker and the upstream client does not, so the '{1}' service is not " +
-            "provably ours") -f $checked, $ServiceName
+            "writes that marker into its own application data directory, so the '{1}' service is " +
+            "not provably ours") -f $checked, $ServiceName
         return [PSCustomObject]@{
             CanRemove = $false
             Reason    = $missing
