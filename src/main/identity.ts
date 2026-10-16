@@ -43,9 +43,30 @@
 // what stops one of them being changed without the other.
 export const applicationIdentity = "jiejiebox";
 
-// The AppData directory name. Upstream used `sing-box`, so this is where settings.db,
-// profiles/, session/, crash_dumps/ and the whole preference lifetime live.
-export const applicationDataDirectoryName = applicationIdentity;
+// The AppData directory name - and it is UPSTREAM'S value, deliberately.
+//
+// This said `jijiebox` and it bought nothing. It is not the directory an install uses: the
+// installer's own default is upstream's literal `$APPDATA\sing-box` (build/installer.nsh), it
+// records that in the layout key, and the runtime prefers the key
+// (installationLayout.ts -> applicationPaths.ts). Measured on a machine with both clients
+// installed, the two layout keys recorded the SAME path:
+//
+//     HKLM\SOFTWARE\SagerNet\sing-box    ApplicationDataDirectory = C:\ProgramData\sing-box
+//     HKLM\SOFTWARE\Jiejiebox\jiejiebox  ApplicationDataDirectory = C:\ProgramData\sing-box
+//
+// So `jijiebox` was reachable only as applicationPaths.ts's FALLBACK - the value used when the
+// layout key is absent or unreadable, and by the development server. That made it a second data
+// path that nothing had ever written to: a layout-read failure would have sent the client into an
+// empty `%APPDATA%\jijiebox` instead of the tree holding the user's profiles. Two spellings for one
+// thing, with the losing one reachable exactly when something has already gone wrong.
+//
+// Reverting it to upstream's value removes the second path and changes nothing else: the installer
+// already used `sing-box`, so installed clients do not move, and no data is migrated.
+//
+// NOTE this is the ONE identity value that is not isolated, and that is correct rather than
+// unfinished - see the daemon service name and daemon data directory below, which are machine-global
+// in a way that genuinely collides.
+export const applicationDataDirectoryName = "sing-box";
 
 // The name under %ProgramData% that the privileged daemon keeps its state in. Also the
 // daemon's `defaultServiceWorkingDirectory` in experimental/boxdd/cmd_service_windows.go.
