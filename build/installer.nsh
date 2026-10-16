@@ -1953,7 +1953,7 @@ FunctionEnd
   ${endif}
   !insertmacro executeDataTransition "Commit"
   ${if} $1 != 0
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$(dataMigrationCleanupFailed)"
+    MessageBox MB_OK|MB_ICONEXCLAMATION|/SD IDOK "$(dataMigrationCleanupFailed)"
   ${endif}
   StrCpy $4 0
   !insertmacro refreshDesktopShortcutIfPresent "$newDesktopLink" "$oldDesktopLink" $4
