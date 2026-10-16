@@ -179,6 +179,10 @@ Var ciDiagnosticPath
   # not run" and "Recover ran and did nothing" are different findings, and the second is what a
   # successful Commit is supposed to leave.
   Var dataTransitionStatePresent
+  # Set when this install adopted a PREVIOUS release line's data directory instead of inventing a
+  # new one - see adoptLegacyInstallationLayout. Recorded, so the diagnostic says which of the two
+  # ways the application data directory was decided.
+  Var legacyApplicationDataAdopted
 
   !macro customLicensePagePre
     !define MUI_PAGE_CUSTOMFUNCTION_PRE skipAcceptedLicensePage
@@ -773,6 +777,98 @@ FunctionEnd
   ${endif}
 !macroend
 
+# Adopts the data directories recorded by a PREVIOUS release line, so upgrading to this client
+# continues an installation instead of colliding with its remains.
+#
+# # The failure this exists for
+#
+# `Initialize-ApplicationDataDirectory` (installer-preflight.ps1) refuses to use a directory that
+# has entries but whose `:jiejiebox.installation-id` stream does not name THIS installation:
+#
+#     The application data directory must be empty.   -> Exit-Installer 25
+#
+# The earlier release line wrote its layout under `SOFTWARE\SagerNet\sing-box` and put the
+# application data in `%ProgramData%\sing-box`. This client reads only its OWN layout key, so on a
+# machine whose previous client was uninstalled - or was never seen, because its registry identity
+# is a different key - the installer believes it is installing onto a clean machine. It then
+# defaults the data directory to that same `%ProgramData%\sing-box` while reading a key that is
+# absent, finds the older client's profiles and settings already there, finds no marker of its own,
+# and ABORTS. The user cannot install at all, and the data blocking them is their own.
+#
+# Adoption turns that into an upgrade: the recorded directories are taken over, this installation
+# records its own layout under its own key, and `Initialize-ApplicationDataDirectory` is satisfied
+# because `$installationID` is this installation's - it writes its marker and the directory now
+# belongs to this client.
+#
+# # Why every one of these conditions is required
+#
+# `SOFTWARE\SagerNet\sing-box` is ALSO the UPSTREAM client's key; src/main/installationLayout.ts
+# says in as many words that reading it would make this client adopt the upstream client's
+# directories wholesale. That must not happen, so adoption is narrowed to a layout that can only
+# have come from the previous line of THIS fork:
+#
+#   * `LayoutVersion` AND `InstallationID` are both present. The `InstallationID` value is the
+#     fork's own addition; a layout without it is some other client's record.
+#   * `ApplicationDataDirectory` is not inside this user's roaming profile. The fork's choice is
+#     machine-wide %ProgramData%; a per-user `%APPDATA%` directory is upstream's arrangement, and
+#     adopting that is exactly the wholesale takeover being avoided.
+#   * it is not inside `$INSTDIR`. A data directory nested in the program directory is not this
+#     layout, and adopting it would put the two in each other's way.
+#   * it does not overlap the daemon data directory.
+#
+# When a condition fails nothing is adopted and the installer behaves exactly as it does today -
+# which is the safe outcome, because the alternative is claiming a directory this client has no
+# evidence it owns.
+!macro adoptLegacyInstallationLayout
+  ${if} $hasInstallationLayout == 0
+    Push $R0
+    Push $R1
+    Push $R2
+
+    StrCpy $legacyApplicationDataAdopted 0
+    StrCpy $R0 0
+    StrCpy $R1 ""
+    StrCpy $R2 ""
+
+    !insertmacro setInstallationLayoutRegistryView
+    ReadRegDWORD $R0 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "LayoutVersion"
+    ReadRegStr $R1 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "ApplicationDataDirectory"
+    ReadRegStr $R2 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "DaemonDataDirectory"
+    ReadRegStr $applicationDataDirectory HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "InstallationID"
+    !insertmacro restoreInstallerRegistryView
+
+    # `LayoutVersion` present, `InstallationID` present, `ApplicationDataDirectory` named.
+    ${if} $R0 != 0
+    ${andif} $R1 != ""
+    ${andif} $applicationDataDirectory != ""
+      # Not this user's roaming profile, and not inside the installation directory.
+      SetShellVarContext current
+      ${StrContains} $0 "$APPDATA\sing-box" $R1
+      SetShellVarContext all
+      ${StrContains} $3 "$INSTDIR" $R1
+      ${if} $0 == ""
+      ${andif} $3 == ""
+        # The daemon's directory is adopted only when it is a real path of its own; otherwise the
+        # default is kept rather than cleared.
+        ${if} $R2 != ""
+          StrCpy $daemonDataDirectory $R2
+        ${endif}
+        StrCpy $applicationDataDirectory $R1
+        StrCpy $hasExistingInstallation 1
+        StrCpy $legacyApplicationDataAdopted 1
+      ${else}
+        StrCpy $applicationDataDirectory ""
+      ${endif}
+    ${else}
+      StrCpy $applicationDataDirectory ""
+    ${endif}
+
+    Pop $R2
+    Pop $R1
+    Pop $R0
+  ${endif}
+!macroend
+
 !macro restoreInstallerRegistryView
   !ifdef APP_ARM64
     ${if} ${RunningX64}
@@ -970,6 +1066,7 @@ FunctionEnd
   # (src/main/installationLayout.ts, CommonApplicationData), so this is the same path
   # whether or not an installation layout has been recorded yet.
   StrCpy $daemonDataDirectory "${COMMON_APPLICATION_DATA}\${DAEMON_DATA_DIRECTORY_NAME}"
+  StrCpy $legacyApplicationDataAdopted 0
   StrCpy $0 0
   ReadRegDWORD $0 HKLM "${INSTALLATION_LAYOUT_REGISTRY_KEY}" "LayoutVersion"
   ${if} $0 == 2
@@ -979,6 +1076,12 @@ FunctionEnd
     StrCpy $hasInstallationLayout 1
   ${endif}
   !insertmacro restoreInstallerRegistryView
+  !insertmacro adoptLegacyInstallationLayout
+  # Which of the two ways the application data directory was decided. Without this the record
+  # cannot tell an adopted previous release line from a clean install, and the refusal this
+  # adoption exists to prevent - "The application data directory must be empty." - would look
+  # like a directory problem rather than an adoption that did not happen.
+  !insertmacro ciDiagnostic "customInit" "layout=$hasInstallationLayout adoptedLegacy=$legacyApplicationDataAdopted appData=$applicationDataDirectory daemonData=$daemonDataDirectory"
   ReadRegStr $0 HKLM "${INSTALL_REGISTRY_KEY}" "InstallLocation"
   ${if} $0 != ""
     StrCpy $hasExistingInstallation 1
@@ -2017,10 +2120,17 @@ FunctionEnd
   ${endif}
   ${if} $applicationDataDirectory != ""
     DetailPrint "$(preparingApplicationDataDirectory)"
+    # `-Adopted` tells the preflight that this directory has just been taken over from a previous
+    # release line. The preflight does not take that on trust: it re-checks the previous line's
+    # own record before re-owning a non-empty directory. See adoptLegacyInstallationLayout.
+    StrCpy $3 "-PrepareApplicationDataDirectory"
+    ${if} $legacyApplicationDataAdopted == 1
+      StrCpy $3 "$3 -Adopted"
+    ${endif}
     ${if} $allowUnsafeInstallation == 1
-      !insertmacro executeInstallationPreflight "-AllowUnsafeInstallationDirectory -PrepareApplicationDataDirectory"
+      !insertmacro executeInstallationPreflight "-AllowUnsafeInstallationDirectory $3"
     ${else}
-      !insertmacro executeInstallationPreflight "-PrepareApplicationDataDirectory"
+      !insertmacro executeInstallationPreflight "$3"
     ${endif}
     ${if} $1 != 0
       Call setInstallationValidationMessage

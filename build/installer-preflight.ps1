@@ -10,6 +10,10 @@ param(
     [Alias("RepairInstallationAncestors")][switch]$RepairPathAncestors,
     [switch]$ResetWorkingDirectory,
     [switch]$PrepareApplicationDataDirectory,
+    # The installer has taken this application data directory over from a PREVIOUS release line,
+    # so a non-empty directory is expected rather than refused. The evidence is re-checked below
+    # (Test-LegacyLayoutNamesDirectory); this switch only says which question to ask.
+    [switch]$Adopted,
     [switch]$DeleteDataDirectories
 )
 
@@ -589,7 +593,34 @@ function Set-ApplicationDataDirectoryAccessControl([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $accessControl
 }
 
-function Initialize-ApplicationDataDirectory([string]$Path, [string]$ID) {
+# Did a PREVIOUS release line record THIS directory as its application data directory?
+#
+# `SOFTWARE\SagerNet\sing-box` is shared with the upstream client, so this is deliberately narrow
+# and is only consulted when this installation has no layout of its own - that is, when the
+# directory is pre-existing and is about to be treated as a stranger's. It answers one question:
+# can the directory be re-owned instead of refused?
+#
+# It requires the legacy record to name this exact directory AND to carry an InstallationID,
+# which is the fork's own addition to the layout and not something the upstream client writes.
+function Test-LegacyLayoutNamesDirectory([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\SagerNet\sing-box")
+    if ($null -eq $key) { return $false }
+    try {
+        $declared = $key.GetValue("ApplicationDataDirectory", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $identifier = $key.GetValue("InstallationID", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ([string]::IsNullOrWhiteSpace($declared) -or [string]::IsNullOrWhiteSpace($identifier)) { return $false }
+        # Test-PathOverlap, not a path-equality helper: it is the one already in this file, and it
+        # answers "is this the same directory" with GetFullPath + TrimEnd + OrdinalIgnoreCase, which
+        # is the comparison a registry value written by an installer needs.
+        if (-not (Test-PathOverlap $declared $Path)) { return $false }
+        return $true
+    } finally {
+        $key.Dispose()
+    }
+}
+
+function Initialize-ApplicationDataDirectory([string]$Path, [string]$ID, [switch]$Adopted) {
     if ([string]::IsNullOrWhiteSpace($ID)) {
         throw "The installation ID is missing."
     }
@@ -604,7 +635,20 @@ function Initialize-ApplicationDataDirectory([string]$Path, [string]$ID) {
         }
         $existingEntry = Get-ChildItem -LiteralPath $Path -Force | Select-Object -First 1
         if ($null -ne $existingEntry) {
-            throw "The application data directory must be empty."
+            # A directory that holds data and does not carry OUR marker. Refusing is the default,
+            # and it is what made the installer unusable on a machine whose previous client had
+            # left its profiles here: the user was told their own data directory "must be empty",
+            # with no way to proceed except deleting it by hand.
+            #
+            # It is re-owned only when the PREVIOUS RELEASE LINE's own record names this exact
+            # directory. That record is the evidence that this data is this product's, and the
+            # check is made HERE rather than taken from the caller, so a preflight invoked for any
+            # other reason cannot be talked into claiming a directory. On an empty directory the
+            # question does not arise, and on a directory belonging to another client the record
+            # does not name it, so the refusal stands.
+            if (-not $Adopted -or -not (Test-LegacyLayoutNamesDirectory $Path)) {
+                throw "The application data directory must be empty."
+            }
         }
     } else {
         [void][System.IO.Directory]::CreateDirectory($Path)
@@ -816,7 +860,7 @@ try {
     if ($PrepareApplicationDataDirectory -and
         -not [string]::IsNullOrWhiteSpace($ApplicationDataDirectory)) {
         try {
-            Initialize-ApplicationDataDirectory $ApplicationDataDirectory $InstallationID
+            Initialize-ApplicationDataDirectory $ApplicationDataDirectory $InstallationID -Adopted:$Adopted
         } catch {
             Write-InstallerOutput $_.Exception.Message
             Exit-Installer 25
