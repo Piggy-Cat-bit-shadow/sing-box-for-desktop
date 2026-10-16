@@ -820,6 +820,17 @@ FunctionEnd
     ClearErrors
     FileOpen $9 "$ciDiagnosticPath" a
     ${ifNot} ${Errors}
+      # NSIS FileOpen mode `a` PRESERVES the contents but leaves the file pointer at the START of
+      # the file - it does not append on its own. Without this seek every marker overwrote the
+      # previous one from offset 0, so a short write after a long one left the tail of the long
+      # string behind.
+      #
+      # That single omission explains every anomaly in the diagnostic channel at once: the file
+      # never grew, its size stayed near 162 bytes, `[customInstall] EXIT` was followed by a bare
+      # `op=Commit`, and fragments like `ll` and `ore Authenticode signer certificate ...` appeared
+      # - none of which are marker text, and all of which are what the tail of an overwritten line
+      # looks like. No second writer was ever involved.
+      FileSeek $9 0 END
       FileWrite $9 "[${STAGE}] ${DETAIL}$\r$\n"
       FileClose $9
     ${endif}
@@ -883,7 +894,6 @@ FunctionEnd
 !macroend
 
 !macro customInit
-  !insertmacro ciDiagnostic "customInit" "ENTER"
   !insertmacro confirmNativeArchitecture
   !insertmacro setInstallationLayoutRegistryView
   StrCpy $allowUnsafeInstallation 0
@@ -904,6 +914,13 @@ FunctionEnd
   ${ifNot} ${Errors}
     StrCpy $ciDiagnosticPath $R1
   ${endif}
+  # The ENTER marker belongs AFTER the option is parsed, not before it.
+  #
+  # It used to be the first statement in this macro, so at that moment $ciDiagnosticPath was
+  # still unset and the guard skipped the write - the marker could never appear in any run, no
+  # matter what was passed on the command line. A marker that is structurally incapable of being
+  # written is worse than no marker, because its absence reads as "this code did not run".
+  !insertmacro ciDiagnostic "customInit" "ENTER"
   !insertmacro ciDiagnostic "customInit" "diagnostic channel opened; INSTDIR=$INSTDIR"
   StrCpy $migrateExistingData ${BST_CHECKED}
   StrCpy $migrateLegacyApplicationData 0
