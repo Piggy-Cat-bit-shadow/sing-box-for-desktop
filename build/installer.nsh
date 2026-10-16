@@ -80,6 +80,19 @@ SetFont "Segoe UI" 9
 # removing one client removes the other's context menu entry.
 !define TAILDROP_VERB_REGISTRY_KEY "Software\Classes\*\shell\JiejieboxTaildrop"
 
+# The CI-only diagnostic channel's path, declared OUTSIDE the installer/uninstaller
+# conditional on purpose.
+#
+# It used to live inside the `!ifndef BUILD_UNINSTALLER` block below, so the uninstaller pass
+# never declared it - and customUnInit could not touch it. That mattered because
+# customUnInit is the only uninstall-side callback that can read the command line, and without
+# a path to write to, every uninstall-side marker was inert: the guard stayed empty, nothing
+# was written, and the record looked exactly as if the uninstall code had never run.
+#
+# Declaring it here makes it a global in BOTH passes. It is still completely inert unless
+# /CI-DIAGNOSTIC-PATH= is passed: empty means every ciDiagnostic write is skipped.
+Var ciDiagnosticPath
+
 !ifndef BUILD_UNINSTALLER
   !include StrContains.nsh
   !define DO_NOT_CREATE_DESKTOP_SHORTCUT
@@ -110,7 +123,6 @@ SetFont "Segoe UI" 9
   Var reinstallExistingInstallationRadio
   Var reinstallExistingInstallation
   Var standardInstallationRadio
-  Var ciDiagnosticPath
   Var customInstallationRadio
   Var customInstallation
   Var applicationDataDirectory
@@ -2063,6 +2075,17 @@ FunctionEnd
 !macroend
 
 !macro customUnInit
+  # Open the diagnostic channel here too. The path variable is shared with the installer
+  # pass, and the installer's customInit is what normally sets it - but customInit never
+  # runs during an uninstall, so every uninstall-side marker was inert and the record
+  # looked as if the uninstall code had never executed at all.
+  StrCpy $ciDiagnosticPath ""
+  ClearErrors
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/CI-DIAGNOSTIC-PATH=" $R1
+  ${ifNot} ${Errors}
+    StrCpy $ciDiagnosticPath $R1
+  ${endif}
   !insertmacro ciDiagnostic "customUnInit" "ENTER"
   StrCpy $keepUninstallData ${BST_CHECKED}
   !insertmacro setInstallationLayoutRegistryView
@@ -2100,8 +2123,11 @@ FunctionEnd
   !insertmacro ciDiagnostic "customUnInstall" "ENTER"
   SetDetailsPrint both
   ${ifNot} ${isUpdated}
+    !insertmacro ciDiagnostic "customUnInstall" "branch=standalone (isUpdated false)"
     !insertmacro daemonExecutable $0
+    !insertmacro ciDiagnostic "customUnInstall" "daemon path resolved; FileExists checked next"
     ${if} ${FileExists} "$0"
+      !insertmacro ciDiagnostic "customUnInstall" "daemon PRESENT; calling service uninstall"
       DetailPrint "$(removingService)"
       !insertmacro executeDaemonServiceCommand "uninstall" "" $1 $3
       ${if} $1 != 0
