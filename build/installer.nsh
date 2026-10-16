@@ -1033,12 +1033,29 @@ FunctionEnd
   StrCpy $defaultApplicationDataDirectory $applicationDataDirectory
   StrCpy $defaultDaemonDataDirectory $daemonDataDirectory
   StrCpy $workingDirectory $daemonDataDirectory
-  # $PROFILE, not $APPDATA: the state file is per-user scratch space for one installer run,
-  # and installer-data.ps1 validates this path against the CURRENT USER's roaming profile
-  # (CommonApplicationData is NOT where it looks - see Initialize-TransitionStateStorage).
-  # $PROFILE is the profile this installer was launched from and does not move when the
-  # shell variable context does.
-  StrCpy $dataTransitionStatePath "$PROFILE\AppData\Roaming\${INSTALLER_STATE_DIRECTORY_NAME}\data-transition.json"
+  # %ProgramData%, through the same define the daemon data directory uses - NOT $PROFILE.
+  #
+  # This was `$PROFILE\AppData\Roaming\...` on the theory that the transition state is one
+  # installer run's scratch space. It is not, and installer-data.ps1 does not treat it that way:
+  # Initialize-TransitionStateStorage builds the path it will accept from
+  # [Environment]::GetFolderPath(CommonApplicationData) and throws
+  #
+  #     "The data migration state path is invalid."
+  #
+  # for anything else. Every call was therefore rejected - the state file was never written and
+  # never read, so no data migration could ever be prepared, committed, recovered or rolled back.
+  #
+  # It stayed invisible because executeDataTransition could not report its exit code: the two
+  # transitions on a successful install and the two on a failed one each exited 40 with that
+  # message and the record kept neither. It surfaced only when a Prepare that had always failed
+  # began to ABORT - installer-data.ps1 throws before the state file is consulted, so the
+  # install -> reinstall -> uninstall -> reinstall sequence failed at the last step, with the
+  # installer's own exit code as the only clue.
+  #
+  # The script is right and this line was wrong: it hardens the directory to SYSTEM and
+  # Administrators, which is a machine-wide resource, and it computes its expected path from
+  # CommonApplicationData. The two sides have to spell %ProgramData% the same way.
+  StrCpy $dataTransitionStatePath "${COMMON_APPLICATION_DATA}\${INSTALLER_STATE_DIRECTORY_NAME}\data-transition.json"
   InitPluginsDir
   File /oname=$PLUGINSDIR\installer-preflight.ps1 "${BUILD_RESOURCES_DIR}\installer-preflight.ps1"
   File /oname=$PLUGINSDIR\installer-service.ps1 "${BUILD_RESOURCES_DIR}\installer-service.ps1"
