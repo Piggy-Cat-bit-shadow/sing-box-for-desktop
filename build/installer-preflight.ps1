@@ -689,7 +689,19 @@ function Get-LegacyLayoutDirectoryVerdict([string]$Path) {
     }
     $key = $null
     try {
-        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\SagerNet\sing-box")
+        # %ProgramData% and this layout key are MACHINE-wide, and the key is written by the 64-bit
+        # view of HKLM. It has to be read from that view explicitly.
+        #
+        # The installer is a 32-bit process, so its `$SYSDIR` is SysWOW64 and the PowerShell child
+        # it launches is 32-bit too - that child's `HKLM\SOFTWARE` is WOW6432Node, where
+        # `SOFTWARE\SagerNet\sing-box` does not exist. Reading it without asking for the view
+        # therefore reported "the legacy key does not exist" on a machine where it plainly did, and
+        # the adoption was refused for a key that was there all along. Nothing downstream could see
+        # this: the value, the directory and the marker were all correct.
+        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64
+        ).OpenSubKey("SOFTWARE\SagerNet\sing-box")
     } catch {
         return [PSCustomObject]@{ Names = $false; Reason = "the legacy key could not be opened: $($_.Exception.Message)" }
     }
