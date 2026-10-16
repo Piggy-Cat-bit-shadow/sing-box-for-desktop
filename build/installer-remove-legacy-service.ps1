@@ -54,11 +54,31 @@ if ($null -ne $service -and -not [string]::IsNullOrWhiteSpace($service.PathName)
     }
 }
 
+# The directory the previous version recorded as its application data directory, so the
+# ownership proof is looked for where that version actually put its marker.
+#
+# This fork is per-machine: its application data directory is `%ProgramData%\<name>`, and the
+# ownership proof is a marker inside it. The decision used to look only in the per-user roaming
+# profile, found nothing on exactly the machine this cleanup exists for, and skipped - leaving
+# the previous `sing-box-daemon` RUNNING, holding its log files open, so the installer's
+# working-directory reset could not delete them and the installation aborted with code 30.
+#
+# An unreadable layout is not evidence of ownership; the decision keeps its own candidates.
+$legacyApplicationDataDirectory = ""
+try {
+    $legacyLayout = Get-ItemProperty -Path $LegacyLayoutRegistryKey -ErrorAction Stop
+    if ($null -ne $legacyLayout -and -not [string]::IsNullOrWhiteSpace($legacyLayout.ApplicationDataDirectory)) {
+        $legacyApplicationDataDirectory = [string]$legacyLayout.ApplicationDataDirectory
+    }
+} catch {
+}
+
 $decision = Get-JiejieboxLegacyOwnershipDecision `
     -ServiceName $serviceName `
     -ServiceExists ($null -ne $service) `
     -ServiceImagePath $imagePath `
-    -LegacyApplicationDataDirectoryName $LegacyApplicationDataDirectoryName
+    -LegacyApplicationDataDirectoryName $LegacyApplicationDataDirectoryName `
+    -LegacyApplicationDataDirectory $legacyApplicationDataDirectory
 
 if (-not $decision.CanRemove) {
     Write-Output "skipping legacy service cleanup: $($decision.Reason)"
@@ -83,8 +103,14 @@ if ($service.State -ne "Stopped") {
 # `sc.exe delete` rather than the service manager API: it is the same call the installer's own
 # cleanup steps use, and it reports "marked for deletion" the ordinary way when the service
 # still has an open handle.
+#
+# `& $sc`, not `& $sc.exe`. PowerShell reads the latter as "invoke the `exe` PROPERTY of $sc"
+# rather than the string, fails with "The expression after '&' in a pipeline element produced an
+# object that was not valid", and - under this script's $ErrorActionPreference = "Stop" - ends
+# the script with exit 1 BEFORE the service is deleted. The cleanup therefore reported failure,
+# left the service registered, and left it starting automatically on every boot.
 $sc = Join-Path $env:SystemRoot "System32\sc.exe"
-& $sc.exe delete $serviceName | Out-Null
+& $sc delete $serviceName | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Output "sc.exe delete '$serviceName' exited $LASTEXITCODE"
 } else {

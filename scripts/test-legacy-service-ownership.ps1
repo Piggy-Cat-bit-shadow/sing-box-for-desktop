@@ -121,6 +121,48 @@ Report "Case C6: two signals missing -> SKIP" (-not $decision.CanRemove) $decisi
 $decision = Evaluate -ServiceExists $true -ImagePath $daemonImage -Marker $markerPresent -Volume $fixedVolume -LegacyDirectoryName ""
 Report "Case C7: no legacy directory to check -> SKIP" (-not $decision.CanRemove) $decision.Reason
 
+# --- Case D: the proof is where the previous version ACTUALLY put it ---------------------
+#
+# The regression this covers: the decision used to look only in the per-user roaming profile
+# ([Environment]::GetFolderPath(ApplicationData)). This client is per-machine, so a previous
+# fork installation puts its marker in `%ProgramData%\<name>`, and the check found nothing on
+# exactly the machine the cleanup exists for. The service was then never stopped, kept its log
+# files open, and the installer's working-directory reset aborted the installation with code 30.
+#
+# These use the REAL filesystem rather than an injected signal, so the candidate paths are the
+# ones production will build.
+$realRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("legacy-ownership-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+try {
+    # D1: the caller names the previous version's recorded application data directory.
+    New-Item -ItemType Directory -Path $realRoot -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $realRoot ".access-control") -Value "" -NoNewline
+    $realTree = "C:\Program Files\sing-box"
+    $decision = Get-JiejieboxLegacyOwnershipDecision `
+        -ServiceName "sing-box-daemon" `
+        -ServiceExists $true `
+        -ServiceImagePath "$realTree\resources\daemon\sing-box-daemon.exe" `
+        -LegacyApplicationDataDirectoryName "sing-box" `
+        -LegacyApplicationDataDirectory $realRoot `
+        -TestFixedVolume { param($p) $true }
+    Report "Case D1: proof at the recorded app data directory -> MAY REMOVE" $decision.CanRemove "proof=$($decision.ProofPath)"
+    Report "Case D1: the proof path is the one that was searched" ($decision.ProofPath -eq (Join-Path $realRoot ".access-control")) $decision.ProofPath
+
+    # D2: the machine-wide default is searched even when the caller names no directory, which is
+    # the path a previous fork installation actually used.
+    $commonApplicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $expectedCandidate = Join-Path (Join-Path $commonApplicationData "sing-box") ".access-control"
+    $decision = Get-JiejieboxLegacyOwnershipDecision `
+        -ServiceName "sing-box-daemon" `
+        -ServiceExists $true `
+        -ServiceImagePath "$realTree\resources\daemon\sing-box-daemon.exe" `
+        -LegacyApplicationDataDirectoryName "sing-box" `
+        -TestFixedVolume { param($p) $true }
+    $searchedCommon = ($decision.Reason -like "*$expectedCandidate*") -or ($decision.ProofPath -eq $expectedCandidate)
+    Report "Case D2: %ProgramData% is searched without a recorded directory" $searchedCommon "proof=$($decision.ProofPath)"
+} finally {
+    Remove-Item -LiteralPath $realRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- The marker constant ----------------------------------------------------------------
 #
 # The proof is one specific file name, and it has to be the name this client actually writes.

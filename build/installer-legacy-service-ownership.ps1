@@ -41,6 +41,10 @@ function Get-JiejieboxLegacyOwnershipDecision {
         [Parameter(Mandatory = $true)][bool]$ServiceExists,
         [AllowEmptyString()][string]$ServiceImagePath,
         [AllowEmptyString()][string]$LegacyApplicationDataDirectoryName,
+        # The directory the previous version actually recorded as its application data
+        # directory, when the caller can read it. See the candidate list below for why the
+        # directory NAME alone is not enough.
+        [AllowEmptyString()][string]$LegacyApplicationDataDirectory = "",
         # Injected so the decision can be tested without a machine. Both default to the real
         # filesystem, and neither is called when an earlier signal has already failed.
         [scriptblock]$TestPath = { param($p) Test-Path -LiteralPath $p -PathType Leaf },
@@ -116,27 +120,58 @@ function Get-JiejieboxLegacyOwnershipDecision {
         }
     }
 
-    $proofPath = ""
+    # # Why the proof is looked for in several places
+    #
+    # The marker has to be checked where the previous version actually PUT its application data,
+    # and this fork does not use the per-user roaming directory that
+    # [Environment]::GetFolderPath(ApplicationData) returns. It is a per-machine client: its
+    # application data directory is `%ProgramData%\<name>`, chosen in customInit and recorded in
+    # its layout key. Checking only the roaming profile therefore found nothing on exactly the
+    # machine this cleanup exists for - a previous fork installation - and the service was never
+    # stopped or removed.
+    #
+    # That is not a cosmetic miss. The leftover `sing-box-daemon` keeps running, holds its own
+    # log files open under the daemon data directory, and the installer's working-directory
+    # reset then fails to delete them and aborts with "Could not reset the sing-box service data
+    # directory (code 30)". One wrong directory turned into a failed installation.
+    #
+    # The marker is still the proof and nothing else is: every candidate is only a place to LOOK
+    # for it, and the upstream client writes no such file anywhere.
+    $candidateProofPaths = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($LegacyApplicationDataDirectory)) {
+        $candidateProofPaths.Add((Join-Path $LegacyApplicationDataDirectory $ownershipMarkerFileName))
+    }
     if (-not [string]::IsNullOrWhiteSpace($LegacyApplicationDataDirectoryName)) {
+        $commonApplicationData = [Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::CommonApplicationData
+        )
+        if (-not [string]::IsNullOrWhiteSpace($commonApplicationData)) {
+            $candidateProofPaths.Add((Join-Path (Join-Path $commonApplicationData $LegacyApplicationDataDirectoryName) $ownershipMarkerFileName))
+        }
         $profilesRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
         if (-not [string]::IsNullOrWhiteSpace($profilesRoot)) {
-            $proofPath = Join-Path (Join-Path $profilesRoot $LegacyApplicationDataDirectoryName) `
-                $ownershipMarkerFileName
+            $candidateProofPaths.Add((Join-Path (Join-Path $profilesRoot $LegacyApplicationDataDirectoryName) $ownershipMarkerFileName))
         }
     }
-    if ([string]::IsNullOrWhiteSpace($proofPath) -or -not (& $TestPath $proofPath)) {
+
+    $proofPath = ""
+    foreach ($candidate in $candidateProofPaths) {
+        if (& $TestPath $candidate) { $proofPath = $candidate; break }
+    }
+    if ([string]::IsNullOrWhiteSpace($proofPath)) {
         # Built with -f in one expression: a backtick-continued `-f` reads as a literal
         # operator on the next line and formats nothing, which is how this message first
         # rendered its own placeholder to the user.
+        $checked = if ($candidateProofPaths.Count -eq 0) { "nothing" } else { $candidateProofPaths -join "', '" }
         $missing = ("no Jiejiebox ownership proof at '{0}': a previous version of this fork " +
             "writes that marker and the upstream client does not, so the '{1}' service is not " +
-            "provably ours") -f $proofPath, $ServiceName
+            "provably ours") -f $checked, $ServiceName
         return [PSCustomObject]@{
             CanRemove = $false
             Reason    = $missing
             ImagePath = $image
             Root      = $root
-            ProofPath = $proofPath
+            ProofPath = ""
         }
     }
 
