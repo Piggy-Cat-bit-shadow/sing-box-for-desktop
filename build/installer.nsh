@@ -860,6 +860,22 @@ FunctionEnd
           StrCpy $daemonDataDirectory $R2
         ${endif}
         StrCpy $applicationDataDirectory $R1
+        # Adoption can leave the "previous" directory equal to this one, because the record being
+        # adopted names the directory this installation is about to re-own - the data does not move.
+        # `$MigrateLegacyApplicationData` is set on the same run (an install record exists and there
+        # was no layout), and installer-data.ps1 treats that flag as "the directory changed"
+        # unconditionally, so old and new were compared as two locations. They then matched, and the
+        # guard against overlapping directories refused the install with
+        #
+        #     The old and new application data directories overlap.        (exit 40)
+        #
+        # on the one arrangement adoption exists to allow. Recording where the data actually is
+        # keeps that state honest: when the two differ the transition migrates, and when they are
+        # the same there is nothing to move.
+        StrCpy $previousApplicationDataDirectory $R1
+        ${if} $R2 != ""
+          StrCpy $previousDaemonDataDirectory $R2
+        ${endif}
         StrCpy $hasExistingInstallation 1
         StrCpy $legacyApplicationDataAdopted 1
       ${else}

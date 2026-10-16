@@ -528,12 +528,20 @@ try {
     if ([System.IO.File]::Exists($StatePath)) {
         throw "An unfinished data migration already exists."
     }
-    $applicationChanged = (
-        $MigrateLegacyApplicationData -or
-        -not (Test-SamePath `
-            $PreviousApplicationDataDirectory `
-            $ApplicationDataDirectory)
-    )
+    # `$MigrateLegacyApplicationData` means "there is a legacy application data directory to move
+    # FROM", and it is reported by the installer whenever an installation record exists and no
+    # layout did. When the legacy directory is the one this installation is adopting, there is
+    # nothing to move: the only copy this operation can build has Source == Target (see the
+    # Test-SamePath below, which skips exactly that case). Treating the flag as a location change
+    # made the overlap guard - a guard against two DIFFERENT directories overlapping - reject an
+    # installation that had already decided to keep the data where it is:
+    #
+    #     The old and new application data directories overlap.        (exit 40)
+    #
+    # The flag stays in the state, because the copy that follows is what reads it.
+    $applicationChanged = -not (Test-SamePath `
+        $PreviousApplicationDataDirectory `
+        $ApplicationDataDirectory)
     $daemonChanged = -not (Test-SamePath `
         $PreviousDaemonDataDirectory `
         $DaemonDataDirectory)
