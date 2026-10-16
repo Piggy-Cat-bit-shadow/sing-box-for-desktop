@@ -824,23 +824,29 @@ FunctionEnd
     Push $R0
     Push $R1
     Push $R2
+    Push $R3
 
     StrCpy $legacyApplicationDataAdopted 0
     StrCpy $R0 0
     StrCpy $R1 ""
     StrCpy $R2 ""
+    StrCpy $R3 ""
 
     !insertmacro setInstallationLayoutRegistryView
     ReadRegDWORD $R0 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "LayoutVersion"
     ReadRegStr $R1 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "ApplicationDataDirectory"
     ReadRegStr $R2 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "DaemonDataDirectory"
-    ReadRegStr $applicationDataDirectory HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "InstallationID"
+    # Read into a scratch register, NOT into $installationID. That register is this installation's
+    # own identity, and it is written into the marker of every directory this client re-owns: two
+    # clients that share one marker value cannot tell each other's data apart, which is the whole
+    # point of the marker. The value is only asked whether it is present.
+    ReadRegStr $R3 HKLM "${LEGACY_INSTALLATION_LAYOUT_REGISTRY_KEY}" "InstallationID"
     !insertmacro restoreInstallerRegistryView
 
     # `LayoutVersion` present, `InstallationID` present, `ApplicationDataDirectory` named.
     ${if} $R0 != 0
     ${andif} $R1 != ""
-    ${andif} $applicationDataDirectory != ""
+    ${andif} $R3 != ""
       # Not this user's roaming profile, and not inside the installation directory.
       SetShellVarContext current
       ${StrContains} $0 "$APPDATA\sing-box" $R1
@@ -863,6 +869,7 @@ FunctionEnd
       StrCpy $applicationDataDirectory ""
     ${endif}
 
+    Pop $R3
     Pop $R2
     Pop $R1
     Pop $R0
@@ -1077,6 +1084,17 @@ FunctionEnd
   ${endif}
   !insertmacro restoreInstallerRegistryView
   !insertmacro adoptLegacyInstallationLayout
+  # The installation's own identity, generated BEFORE anything that consumes it.
+  #
+  # It used to be generated further down, after this point, which meant every run that reached
+  # adoptLegacyInstallationLayout passed an EMPTY -InstallationID to the preflight. The preflight
+  # refuses an empty identity ("The installation ID is missing.") and, because the adoption path
+  # reads the legacy key first, the refusal arrived as exit 25 and was reported as "The application
+  # data directory must be empty." - a message about the directory for a fault in the identity.
+  ${if} $installationID == ""
+    System::Call 'ole32::CoCreateGuid(g .s)'
+    Pop $installationID
+  ${endif}
   # Which of the two ways the application data directory was decided. Without this the record
   # cannot tell an adopted previous release line from a clean install, and the refusal this
   # adoption exists to prevent - "The application data directory must be empty." - would look
@@ -1093,10 +1111,6 @@ FunctionEnd
   ${if} $hasExistingInstallation == 1
   ${andif} $hasInstallationLayout == 0
     StrCpy $migrateLegacyApplicationData 1
-  ${endif}
-  ${if} $installationID == ""
-    System::Call 'ole32::CoCreateGuid(g .s)'
-    Pop $installationID
   ${endif}
   ${if} $daemonDataDirectory == ""
     StrCpy $daemonDataDirectory "${COMMON_APPLICATION_DATA}\${DAEMON_DATA_DIRECTORY_NAME}"
