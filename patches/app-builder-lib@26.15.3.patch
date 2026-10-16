@@ -55,18 +55,27 @@ index 3c6bb19..91f87e8 100644
      !insertmacro licensePage
    !endif
 diff --git a/templates/nsis/include/allowOnlyOneInstallerInstance.nsh b/templates/nsis/include/allowOnlyOneInstallerInstance.nsh
-index b0937c5..2c14203 100644
+index fa91362..475ebb3 100644
 --- a/templates/nsis/include/allowOnlyOneInstallerInstance.nsh
 +++ b/templates/nsis/include/allowOnlyOneInstallerInstance.nsh
-@@ -119,5 +119,2 @@
-       ${endIf}
--      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "$(appRunning)" /SD IDOK IDOK doStopProcess
--      Quit
--
-       doStopProcess:
-@@ -122 +119 @@
--      DetailPrint "$(appClosing)"
-+      DetailPrint "$(closingApplication)"
+@@ -62,7 +62,7 @@
+ 
+ !macro FIND_PROCESS _FILE _RETURN
+   ${if} $IsPowerShellAvailable == 0
+-    nsExec::Exec `"$PowerShellPath" -C "if ((Get-CimInstance -ClassName Win32_Process | ? {$$_.Path -and $$_.Path.StartsWith('$INSTDIR', 'CurrentCultureIgnoreCase')}).Count -gt 0) { exit 0 } else { exit 1 }"`
++    nsExec::Exec `"$PowerShellPath" -C "if ((Get-CimInstance -ClassName Win32_Process | ? {$$_.Path -and $$_.ProcessId -ne $pid -and $$_.Path.StartsWith(''$INSTDIR\'', ''CurrentCultureIgnoreCase'')}).Count -gt 0) { exit 0 } else { exit 1 }"`
+     Pop ${_RETURN}
+   ${else}
+     !ifdef INSTALL_MODE_PER_ALL_USERS
+@@ -90,7 +90,7 @@
+   ${endIf}
+ 
+   ${if} $IsPowerShellAvailable == 0
+-    nsExec::Exec `"$PowerShellPath" -C "Get-CimInstance -ClassName Win32_Process | ? {$$_.Path -and $$_.Path.StartsWith('$INSTDIR', 'CurrentCultureIgnoreCase')} | % { Stop-Process -Id $$_.ProcessId $0 }"`
++    nsExec::Exec `"$PowerShellPath" -C "Get-CimInstance -ClassName Win32_Process | ? {$$_.Path -and $$_.ProcessId -ne $pid -and $$_.Path.StartsWith(''$INSTDIR\'', ''CurrentCultureIgnoreCase'')} | % { Stop-Process -Id $$_.ProcessId $0 }"`
+   ${else}
+     !ifdef INSTALL_MODE_PER_ALL_USERS
+       nsExec::Exec `taskkill /IM "${_FILE}" /FI "PID ne $pid"`
 diff --git a/templates/nsis/multiUser.nsh b/templates/nsis/multiUser.nsh
 index 5b95e10..ddc04eb 100644
 --- a/templates/nsis/multiUser.nsh

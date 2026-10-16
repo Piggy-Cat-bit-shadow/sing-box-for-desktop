@@ -8,7 +8,7 @@ overrides:
   dbus-next>usocket: '-'
 
 patchedDependencies:
-  app-builder-lib@26.15.3: 7c56308a5cc0f545a25461afcc3e02b6b1694986f7aa0302bf6751bec60bcbca
+  app-builder-lib@26.15.3: 1d381f5a8f977544f0f536df0f9354db89a235adadf680944efb6e7bcf818b19
 
 importers:
 
