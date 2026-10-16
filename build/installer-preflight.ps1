@@ -52,6 +52,22 @@ function Write-InstallerOutput([string]$Value) {
     )
 }
 
+# A trace of a refused decision, appended to a fixed file so it can never replace the message the
+# user is about to be shown. Never throws: a trace that cannot be written must not become the
+# failure it was meant to explain.
+function Write-PreflightTrace([string]$Message, [hashtable]$Fields) {
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add("$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message")
+        foreach ($name in ($Fields.Keys | Sort-Object)) {
+            $lines.Add("  $name = $($Fields[$name])")
+        }
+        Add-Content -LiteralPath "$env:ProgramData\jiejiebox-installer\preflight-trace.txt" `
+            -Value $lines -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {
+    }
+}
+
 function Exit-Installer([int]$Code) {
     if (-not [string]::IsNullOrWhiteSpace($ResultCodePath)) {
         [System.IO.File]::WriteAllText(
@@ -703,7 +719,10 @@ function Initialize-ApplicationDataDirectory([string]$Path, [string]$ID, [switch
             # other reason cannot be talked into claiming a directory. On an empty directory the
             # question does not arise, and on a directory belonging to another client the record
             # does not name it, so the refusal stands.
-            if (-not $Adopted -or -not (Test-LegacyLayoutNamesDirectory $Path)) {
+            $legacyNames = Test-LegacyLayoutNamesDirectory $Path
+            Write-InstallerOutput ("adoption gate: adopted={0} legacyNamesDirectory={1} path={2}" -f `
+                $Adopted.IsPresent, $legacyNames, $Path)
+            if (-not $Adopted -or -not $legacyNames) {
                 throw "The application data directory must be empty."
             }
         }
@@ -919,6 +938,21 @@ try {
         try {
             Initialize-ApplicationDataDirectory $ApplicationDataDirectory $InstallationID -Adopted:$Adopted
         } catch {
+            # The refusal below is the one a user actually sees, and it says nothing about WHY the
+            # directory was refused. Record the inputs the decision used before reporting it. The
+            # trace must not throw here: it runs inside a catch, and a throw would replace the
+            # failure it was meant to explain.
+            try {
+                Write-PreflightTrace "PrepareApplicationDataDirectory failed: $($_.Exception.Message)" @{
+                    ApplicationDataDirectory = $ApplicationDataDirectory
+                    InstallationID           = $InstallationID
+                    Adopted                  = $Adopted.IsPresent
+                    DirectoryExists          = (Test-Path -LiteralPath $ApplicationDataDirectory)
+                    EntryCount               = $(if (Test-Path -LiteralPath $ApplicationDataDirectory) { @(Get-ChildItem -LiteralPath $ApplicationDataDirectory -Force).Count } else { -1 })
+                    LegacyNamesDirectory     = (Test-LegacyLayoutNamesDirectory $ApplicationDataDirectory)
+                }
+            } catch {
+            }
             Write-InstallerOutput $_.Exception.Message
             Exit-Installer 25
         }
