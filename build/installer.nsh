@@ -1903,7 +1903,6 @@ FunctionEnd
 !macroend
 
 !macro customUnInstallCheck
-  !insertmacro ciDiagnostic "customUnInstallCheck" "ENTER"
   ${if} $R0 != 0
     DetailPrint "$(previousUninstallerFailed)"
   ${endif}
@@ -2044,7 +2043,6 @@ FunctionEnd
 !macroend
 
 !macro customUnWelcomePage
-  !insertmacro ciDiagnostic "customUnWelcomePage" "ENTER"
   Var keepUninstallData
   Var keepUninstallDataCheckbox
 
@@ -2099,7 +2097,7 @@ FunctionEnd
 !macroend
 
 !macro customUnInstall
-  !insertmacro ciDiagnostic "customUnInstall" "ENTER isUpdated=${isUpdated}"
+  !insertmacro ciDiagnostic "customUnInstall" "ENTER"
   SetDetailsPrint both
   ${ifNot} ${isUpdated}
     !insertmacro daemonExecutable $0
