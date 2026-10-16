@@ -1,4 +1,5 @@
 ; Executes the real chooseForkInstallationDirectory macro and writes what it decided.
+; Also executes fixForkInstallationDirectory against a table of $INSTDIR values.
 ;
 ; WHY THIS EXISTS
 ;
@@ -77,5 +78,33 @@ Section "-install directory probe"
 
   DeleteRegValue SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" "InstallLocation"
   DeleteRegKey SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}"
+
+  ; --- fixForkInstallationDirectory: the $INSTDIR contract, case by case ------------------
+  ;
+  ; The paired macro is what enforces the rule chooseForkInstallationDirectory above now
+  ; honours: $INSTDIR ends with \${APP_FILENAME}. It replaced a `${StrContains}` SUBSTRING test,
+  ; and the four "substring-" rows are exactly what that test got wrong - each of those paths
+  ; contains "sing-box" somewhere, so the old test skipped the repair and left a directory that
+  ; did not end in the executable name.
+  ;
+  ; Written as "##name=value" so the harness can pick these rows out of the same file.
+  !macro FixCase LABEL VALUE
+    StrCpy $INSTDIR "${VALUE}"
+    !insertmacro fixForkInstallationDirectory
+    FileWrite $9 "##${LABEL}=$INSTDIR$\r$\n"
+  !macroend
+
+  !insertmacro FixCase "already-correct"    "C:\Program Files\Jiejiebox\sing-box"
+  !insertmacro FixCase "upstream-layout"    "C:\Program Files\sing-box"
+  !insertmacro FixCase "fork-root-only"     "C:\Program Files\Jiejiebox"
+  !insertmacro FixCase "substring-tools"    "C:\Program Files\sing-box-tools"
+  !insertmacro FixCase "substring-backup"   "C:\Program Files\old\sing-box-backup"
+  !insertmacro FixCase "substring-parent"   "C:\sing-box\Jiejiebox"
+  !insertmacro FixCase "trailing-separator" "C:\Program Files\Jiejiebox\sing-box\"
+  !insertmacro FixCase "trailing-two"       "C:\Program Files\Jiejiebox\sing-box\\"
+  !insertmacro FixCase "suffix-digit"       "C:\Program Files\Jiejiebox\sing-box2"
+  !insertmacro FixCase "bare-name"          "sing-box"
+  !insertmacro FixCase "empty"              ""
+
   FileClose $9
 SectionEnd

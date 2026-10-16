@@ -103,10 +103,41 @@ Report "APP_FILENAME is still sing-box (the executable does not move)" ($probe["
 Report "the fork's directory name is Jiejiebox" ($probe["FORK_DIR_NAME"] -eq "Jiejiebox") $probe["FORK_DIR_NAME"]
 
 $fresh = [string]$probe["fresh"]
-Report "a fresh install does NOT use the upstream directory" ($fresh -notmatch '\\sing-box$') $fresh
-Report "a fresh install uses <program files>\Jiejiebox" ($fresh -match '\\Jiejiebox$') $fresh
-Report "the fresh directory is not the upstream one" ($fresh -ne "C:\Program Files\sing-box") $fresh
-Report "the two default directories differ" (($fresh -ne "C:\Program Files\sing-box")) "fork=$fresh upstream=C:\Program Files\sing-box"
+# The default is `<program files>\Jiejiebox\sing-box`, and the `\sing-box` component is the
+# point, not decoration. electron-builder's contract is that $INSTDIR ends with ${APP_FILENAME} -
+# every default in multiUser.nsh is `<root>\${APP_FILENAME}` - and $INSTDIR is what the SCM's
+# ImagePath, the registered uninstaller and InstallLocation are all written from. The earlier
+# assertions here tested `\Jiejiebox$`, which was the value the macro returned BEFORE
+# customInstallBeforeInstallationChanges appended the executable name; asserting the intermediate
+# value pinned the wrong thing and would have passed while the final directory was wrong.
+Report "a fresh install uses <program files>\Jiejiebox\sing-box" ($fresh -match '\\Jiejiebox\\sing-box$') $fresh
+Report "a fresh install does NOT use the upstream directory" ($fresh -ne "C:\Program Files\sing-box") $fresh
+Report "the fresh default already ends with the executable name" ($fresh -match '\\sing-box$') $fresh
+Report "the fresh default is not the fork root on its own" ($fresh -ne "C:\Program Files\Jiejiebox") $fresh
+
+# fixForkInstallationDirectory: the $INSTDIR contract, case by case.
+#
+# This is the regression cover for the boundary bug. Every "substring-" case contains "sing-box"
+# somewhere in the path, which is what the `${StrContains}` test this replaced asked about - so
+# under the old test all of them skipped the repair and kept a directory that does not end in the
+# executable name.
+$fixCases = [ordered]@{
+    "already-correct"    = "C:\Program Files\Jiejiebox\sing-box"
+    "upstream-layout"    = "C:\Program Files\sing-box"
+    "fork-root-only"     = "C:\Program Files\Jiejiebox\sing-box"
+    "substring-tools"    = "C:\Program Files\sing-box-tools\sing-box"
+    "substring-backup"   = "C:\Program Files\old\sing-box-backup\sing-box"
+    "substring-parent"   = "C:\sing-box\Jiejiebox\sing-box"
+    "trailing-separator" = "C:\Program Files\Jiejiebox\sing-box"
+    "trailing-two"       = "C:\Program Files\Jiejiebox\sing-box"
+    "suffix-digit"       = "C:\Program Files\Jiejiebox\sing-box2\sing-box"
+    "bare-name"          = "sing-box"
+    "empty"              = ""
+}
+foreach ($case in $fixCases.Keys) {
+    $actual = [string]$probe["##$case"]
+    Report "fixForkInstallationDirectory: $case" ($actual -eq $fixCases[$case]) "got '$actual' want '$($fixCases[$case])'"
+}
 
 # An upgrade stays an upgrade: the previous installation's own record of where it went wins,
 # or the user ends up with a second installation beside the first and their data behind.

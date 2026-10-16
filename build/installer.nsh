@@ -75,6 +75,26 @@ SetFont "Segoe UI" 9
 # It matches `productName` and NSIS's own `${PRODUCT_NAME}`, so the directory a user sees is
 # the product name and the file inside it is the authenticated one.
 !define FORK_INSTALLATION_DIRECTORY_NAME "Jiejiebox"
+
+# The path BELOW Program Files that this fork installs into, as one value.
+#
+# `$INSTDIR` must END WITH `${APP_FILENAME}`, and that is electron-builder's contract rather than
+# this fork's preference: `multiUser.nsh` derives every default as `<root>\${APP_FILENAME}`, and
+# `customInstallBeforeInstallationChanges` (an insertion point this fork added to
+# installSection.nsh) runs before `uninstallOldVersion`, the uninstaller write and
+# `registryAddInstallInfo` - so whatever it leaves in `$INSTDIR` becomes the SCM's ImagePath, the
+# registered uninstaller, InstallLocation, and the tree a later uninstall deletes.
+#
+# So the fork's own directory is `${FORK_INSTALLATION_DIRECTORY_NAME}` and the directory under it
+# is the executable name: `...\Jiejiebox\sing-box`. Naming the pair here keeps that explicit
+# rather than leaving it to be reconstructed by a string search on `$INSTDIR` further down - see
+# fixForkInstallationDirectory.
+#
+# The Program Files root is deliberately NOT part of this define: it is an NSIS variable
+# ($PROGRAMFILES64), and the choice between it and $PROGRAMFILES depends on ${RunningX64} /
+# ${IsNativeARM64}, which only exist inside a macro. chooseForkInstallationDirectory makes that
+# choice with the same condition multiUser.nsh uses.
+!define FORK_INSTALLATION_SUBDIRECTORY "${FORK_INSTALLATION_DIRECTORY_NAME}\${APP_FILENAME}"
 # The shell verb for "send with Taildrop". Upstream registers `Taildrop` under the same
 # machine-wide parent key, and uninstall deletes the key wholesale - so sharing it means
 # removing one client removes the other's context menu entry.
@@ -1351,10 +1371,7 @@ FunctionEnd
   FunctionEnd
 
   Function showInstallationDirectoryValidationPage
-    ${StrContains} $0 "${APP_FILENAME}" $INSTDIR
-    ${if} $0 == ""
-      StrCpy $INSTDIR "$INSTDIR\${APP_FILENAME}"
-    ${endif}
+    !insertmacro fixForkInstallationDirectory
     StrCpy $allowUnsafeInstallation 0
     StrCpy $installationValidationAllowsUnsafe 0
     StrCpy $installationValidationMessage ""
@@ -1793,7 +1810,20 @@ FunctionEnd
         StrCpy $0 "$PROGRAMFILES64"
       ${endif}
     !endif
-    StrCpy $0 "$0\${FORK_INSTALLATION_DIRECTORY_NAME}"
+    # BOTH components, not just the fork's own name.
+    #
+    # This used to be `"$0\${FORK_INSTALLATION_DIRECTORY_NAME}"`, which left `$INSTDIR` as
+    # `C:\Program Files\Jiejiebox` - a path that does NOT end with `${APP_FILENAME}`, and so
+    # violates the contract described at FORK_INSTALLATION_SUBDIRECTORY. The `\sing-box` was then
+    # put back by customInstallBeforeInstallationChanges, whose test for whether it was needed was
+    # `${StrContains} $0 "${APP_FILENAME}" $INSTDIR` - a SUBSTRING search, not a path check.
+    #
+    # The installed directory is unchanged by this edit: `...\Jiejiebox` + the append and
+    # `...\Jiejiebox\sing-box` directly are the same path, and the observed records show the
+    # installer producing `C:\Program Files\Jiejiebox\sing-box` both before and after. What
+    # changes is that the path is now CONSTRUCTED rather than repaired by a string search, and the
+    # substring search that could silently accept a wrong directory is gone.
+    StrCpy $0 "$0\${FORK_INSTALLATION_SUBDIRECTORY}"
   ${endif}
 
   # Set INSTDIR rather than the default-only variable: everything downstream - the data
@@ -1802,6 +1832,75 @@ FunctionEnd
   Pop $0
 !macroend
 
+# Restores the one property every route into this installer is supposed to arrive with:
+# `$INSTDIR` ends with `${APP_FILENAME}`.
+#
+# # Why this is a SUFFIX test and not the substring test it replaces
+#
+# Both insertion points used to run
+#
+#     ${StrContains} $0 "${APP_FILENAME}" $INSTDIR
+#     ${if} $0 == ""
+#       StrCpy $INSTDIR "$INSTDIR\${APP_FILENAME}"
+#     ${endif}
+#
+# `${StrContains}` asks whether the string "sing-box" appears ANYWHERE in the path. That is not
+# the contract and it is not a directory boundary: `C:\Program Files\sing-box-tools`,
+# `C:\Program Files\old\sing-box-backup` and `C:\sing-box\Jiejiebox` all contain it and all
+# therefore SKIP the repair, leaving `$INSTDIR` a directory that does not end in the executable
+# name. This fork has already paid for exactly this class of bug once - the instance guard's bare
+# `StartsWith($INSTDIR)` matched `Jiejiebox-old` and `Jiejiebox2`, which is why it now compares
+# against `$INSTDIR\`.
+#
+# The suffix test has the same effect on every path that reaches it today (all of them end in
+# `\sing-box` or in nothing at all) and refuses to be fooled by a path that merely mentions the
+# name. The function touches only `$R1`, which is not a register either call site relies on:
+# customInstallBeforeInstallationChanges treats `$0`, `$1` and `$2` as live, and
+# showInstallationDirectoryValidationPage uses `$0` for the dialog handle.
+!macro fixForkInstallationDirectory
+  Call fixForkInstallationDirectoryOnce
+!macroend
+
+# The body of the macro above, as a FUNCTION rather than inline macro text.
+#
+# NSIS labels are scoped to the enclosing function and not to the macro, so a loop label written
+# inline collides as soon as the macro is inserted more than once: makensis reports
+#
+#     Error: label "..." already declared in section
+#
+# This macro has two insertion points (customInstallBeforeInstallationChanges and
+# showInstallationDirectoryValidationPage), so the trim loop cannot live in the macro body. A
+# function has its own label scope, so a function can carry the loop no matter how many call
+# sites there are - and the macro stays a one-line call.
+#
+# It touches only $R1, and that register belongs to this function's macro, not to the callers.
+# Both call sites treat $0, $1 and $2 as live.
+Function fixForkInstallationDirectoryOnce
+  # Drop trailing separators first. `C:\...\sing-box\` and `C:\...\sing-box` are the same
+  # directory, but only the second matches the suffix check below - and a `/D=` argument, or a
+  # registry value copied by hand, can easily carry the separator. Without this the repair would
+  # append a second one (`...\sing-box\\sing-box`), which is a different path, not the same one.
+  trimTrailingSeparators:
+    StrCpy $R1 $INSTDIR 1 -1
+    StrCmp $R1 "\" 0 trailingSeparatorsTrimmed
+    StrCpy $INSTDIR $INSTDIR -1
+    StrCmp $INSTDIR "" 0 trimTrailingSeparators
+  trailingSeparatorsTrimmed:
+
+  # Nothing to repair in an empty $INSTDIR, and repairing it would produce the rooted-looking
+  # garbage "\sing-box". Left alone so a caller that reached here with nothing gets an obvious
+  # failure at the preflight, not a plausible directory name.
+  StrCmp $INSTDIR "" fixForkInstallationDirectoryDone
+
+  # `${APP_FILENAME}` is 8 characters, so `\` + it is 9 - the same slice the
+  # `StrCpy $var $in "" -1` form would need, and this form is not silently empty.
+  StrCpy $R1 $INSTDIR 9 -9
+  StrCmp $R1 "\${APP_FILENAME}" fixForkInstallationDirectoryDone 0
+  StrCmp $INSTDIR "${APP_FILENAME}" fixForkInstallationDirectoryDone 0
+  StrCpy $INSTDIR "$INSTDIR\${APP_FILENAME}"
+  fixForkInstallationDirectoryDone:
+FunctionEnd
+
 !macro customInstallBeforeCheckAppRunning
   SetDetailsPrint both
   DetailPrint "$(checkingRunningApplication)"
@@ -1809,10 +1908,7 @@ FunctionEnd
 
 !macro customInstallBeforeInstallationChanges
   SetDetailsPrint both
-  ${StrContains} $0 "${APP_FILENAME}" $INSTDIR
-  ${if} $0 == ""
-    StrCpy $INSTDIR "$INSTDIR\${APP_FILENAME}"
-  ${endif}
+  !insertmacro fixForkInstallationDirectory
   # The previous version's daemon service, removed BEFORE electron-builder's
   # `uninstallOldVersion` and before any file is written - see
   # installer-remove-legacy-service.ps1, which owns the ownership decision and is invoked with
