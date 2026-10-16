@@ -676,18 +676,50 @@ function Set-ApplicationDataDirectoryAccessControl([string]$Path) {
 # It requires the legacy record to name this exact directory AND to carry an InstallationID,
 # which is the fork's own addition to the layout and not something the upstream client writes.
 function Test-LegacyLayoutNamesDirectory([string]$Path) {
-    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\SagerNet\sing-box")
-    if ($null -eq $key) { return $false }
+    return (Get-LegacyLayoutDirectoryVerdict $Path).Names
+}
+
+# The same question, with the answer's reasons. `Test-LegacyLayoutNamesDirectory` returns a bare
+# boolean, and every way of answering "no" collapsed into one word: a key that could not be opened,
+# a value that was never written, a path that is genuinely another directory, and a comparison that
+# threw all looked identical from the outside. That is what made a refused adoption undiagnosable.
+function Get-LegacyLayoutDirectoryVerdict([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return [PSCustomObject]@{ Names = $false; Reason = "no directory was given to compare" }
+    }
+    $key = $null
     try {
-        $declared = $key.GetValue("ApplicationDataDirectory", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-        $identifier = $key.GetValue("InstallationID", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-        if ([string]::IsNullOrWhiteSpace($declared) -or [string]::IsNullOrWhiteSpace($identifier)) { return $false }
+        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\SagerNet\sing-box")
+    } catch {
+        return [PSCustomObject]@{ Names = $false; Reason = "the legacy key could not be opened: $($_.Exception.Message)" }
+    }
+    if ($null -eq $key) {
+        return [PSCustomObject]@{ Names = $false; Reason = "the legacy key SOFTWARE\SagerNet\sing-box does not exist" }
+    }
+    try {
+        $declared = [string]$key.GetValue("ApplicationDataDirectory", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $identifier = [string]$key.GetValue("InstallationID", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ([string]::IsNullOrWhiteSpace($declared)) {
+            return [PSCustomObject]@{ Names = $false; Reason = "the legacy key records no ApplicationDataDirectory" }
+        }
+        if ([string]::IsNullOrWhiteSpace($identifier)) {
+            return [PSCustomObject]@{ Names = $false; Reason = "the legacy key records no InstallationID" }
+        }
         # Test-PathOverlap, not a path-equality helper: it is the one already in this file, and it
         # answers "is this the same directory" with GetFullPath + TrimEnd + OrdinalIgnoreCase, which
         # is the comparison a registry value written by an installer needs.
-        if (-not (Test-PathOverlap $declared $Path)) { return $false }
-        return $true
+        $overlap = $false
+        try {
+            $overlap = Test-PathOverlap $declared $Path
+        } catch {
+            return [PSCustomObject]@{ Names = $false; Reason = "the records could not be compared ('$declared' vs '$Path'): $($_.Exception.Message)" }
+        }
+        if (-not $overlap) {
+            return [PSCustomObject]@{ Names = $false; Reason = "the legacy key names '$declared', not '$Path'" }
+        }
+        return [PSCustomObject]@{ Names = $true; Reason = "the legacy key names this directory and carries an identity" }
+    } catch {
+        return [PSCustomObject]@{ Names = $false; Reason = "the legacy key could not be read: $($_.Exception.Message)" }
     } finally {
         $key.Dispose()
     }
@@ -949,7 +981,16 @@ try {
                     Adopted                  = $Adopted.IsPresent
                     DirectoryExists          = (Test-Path -LiteralPath $ApplicationDataDirectory)
                     EntryCount               = $(if (Test-Path -LiteralPath $ApplicationDataDirectory) { @(Get-ChildItem -LiteralPath $ApplicationDataDirectory -Force).Count } else { -1 })
-                    LegacyNamesDirectory     = (Test-LegacyLayoutNamesDirectory $ApplicationDataDirectory)
+                    LegacyVerdict            = (Get-LegacyLayoutDirectoryVerdict $ApplicationDataDirectory).Reason
+                    RegistryView             = $(try {
+                        $probe = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\SagerNet\sing-box")
+                        if ($null -eq $probe) { "key not found" } else {
+                            $result = "layout=$($probe.GetValue('LayoutVersion')) declared='$($probe.GetValue('ApplicationDataDirectory'))' id='$($probe.GetValue('InstallationID'))'"
+                            $probe.Dispose()
+                            $result
+                        }
+                    } catch { "read failed: $($_.Exception.Message)" })
+                    ProcessIs64Bit           = [Environment]::Is64BitProcess
                 }
             } catch {
             }
