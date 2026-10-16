@@ -1903,6 +1903,7 @@ FunctionEnd
 !macroend
 
 !macro customUnInstallCheck
+  !insertmacro ciDiagnostic "customUnInstallCheck" "ENTER"
   ${if} $R0 != 0
     DetailPrint "$(previousUninstallerFailed)"
   ${endif}
@@ -2043,6 +2044,7 @@ FunctionEnd
 !macroend
 
 !macro customUnWelcomePage
+  !insertmacro ciDiagnostic "customUnWelcomePage" "ENTER"
   Var keepUninstallData
   Var keepUninstallDataCheckbox
 
@@ -2063,6 +2065,7 @@ FunctionEnd
 !macroend
 
 !macro customUnInit
+  !insertmacro ciDiagnostic "customUnInit" "ENTER"
   StrCpy $keepUninstallData ${BST_CHECKED}
   !insertmacro setInstallationLayoutRegistryView
   StrCpy $applicationDataDirectory ""
@@ -2092,9 +2095,11 @@ FunctionEnd
   ${ifNot} ${Errors}
     StrCpy $keepUninstallData ${BST_UNCHECKED}
   ${endif}
+  !insertmacro ciDiagnostic "customUnInit" "EXIT"
 !macroend
 
 !macro customUnInstall
+  !insertmacro ciDiagnostic "customUnInstall" "ENTER isUpdated=${isUpdated}"
   SetDetailsPrint both
   ${ifNot} ${isUpdated}
     !insertmacro daemonExecutable $0
@@ -2124,6 +2129,7 @@ FunctionEnd
       DetailPrint "$(removingData)"
       nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-preflight.ps1" -InstallationDirectory "$INSTDIR" -ApplicationDataDirectory "$applicationDataDirectory" -DaemonWorkingDirectory "$daemonDataDirectory" -InstallationID "$installationID" -AllowUnsafeInstallationDirectory -DeleteDataDirectories'
       Pop $1
+        !insertmacro ciDiagnostic "uninstallDeleteData" "preflight returned ${1}"
       ${if} $1 != 0
         Abort "$(preflightFailed)"
       ${endif}
@@ -2145,4 +2151,5 @@ FunctionEnd
       !insertmacro restoreInstallerRegistryView
     ${endif}
   ${endIf}
+  !insertmacro ciDiagnostic "customUnInstall" "EXIT"
 !macroend
