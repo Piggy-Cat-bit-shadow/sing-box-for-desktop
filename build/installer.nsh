@@ -175,6 +175,10 @@ Var ciDiagnosticPath
   Var installationFailureTimer
   Var finishRunCheckbox
   Var dataMigrationPrepared
+  # Whether a half-finished data migration was found at customInit. Recorded because "Recover did
+  # not run" and "Recover ran and did nothing" are different findings, and the second is what a
+  # successful Commit is supposed to leave.
+  Var dataTransitionStatePresent
 
   !macro customLicensePagePre
     !define MUI_PAGE_CUSTOMFUNCTION_PRE skipAcceptedLicensePage
@@ -1042,9 +1046,16 @@ FunctionEnd
   File /oname=$PLUGINSDIR\installer-remove-legacy-service.ps1 "${BUILD_RESOURCES_DIR}\installer-remove-legacy-service.ps1"
   File /oname=$PLUGINSDIR\installer-legacy-service-ownership.ps1 "${BUILD_RESOURCES_DIR}\installer-legacy-service-ownership.ps1"
   File /oname=$PLUGINSDIR\installer-data.ps1 "${BUILD_RESOURCES_DIR}\installer-data.ps1"
+  StrCpy $dataTransitionStatePresent 0
   ${if} ${FileExists} "$dataTransitionStatePath"
-    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-data.ps1" -Operation Recover -StatePath "$dataTransitionStatePath"'
+    StrCpy $dataTransitionStatePresent 1
+  ${endif}
+  !insertmacro ciDiagnostic "customInit" "data transition state present=$dataTransitionStatePresent at $dataTransitionStatePath"
+  ${if} $dataTransitionStatePresent == 1
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-data.ps1" -Operation Recover -StatePath "$dataTransitionStatePath"'
     Pop $0
+    Pop $R0
+    !insertmacro ciDiagnostic "customInit" "Recover exit=$0 out=[$R0]"
     ${if} $0 != 0
       StrCpy $1 $0
       Abort "$(dataMigrationCleanupFailed)"
@@ -1165,16 +1176,30 @@ FunctionEnd
   ${endif}
 !macroend
 
-!macro executeDataTransition OPERATION
+!macro executeDataTransition OPERATION RESULT
   !insertmacro ciDiagnostic "dataTransition" "ENTER op=${OPERATION}"
   StrCpy $3 ""
   ${if} $migrateLegacyApplicationData == 1
     StrCpy $3 "-MigrateLegacyApplicationData"
   ${endif}
+  # ${RESULT} is a caller-supplied register. It used to be a hardcoded `$1`, and three different
+  # meanings shared that one register: the macro wrote -1 into it as a default, wrote the exit
+  # code into it, and the Prepare call site TESTED it. The effect was that the caller could not
+  # tell "the helper returned 7" from "the helper never ran", and the record could not say which.
+  StrCpy ${RESULT} -1
+  ClearErrors
+  # nsExec pushes the exit code and then the output, so the first Pop is the exit code. The
+  # pairing is recorded below rather than assumed, because it is the one thing here that reading
+  # the call site cannot confirm.
   nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-data.ps1" -Operation ${OPERATION} -StatePath "$dataTransitionStatePath" -PreviousApplicationDataDirectory "$previousApplicationDataDirectory" -ApplicationDataDirectory "$applicationDataDirectory" -PreviousDaemonDataDirectory "$previousDaemonDataDirectory" -DaemonDataDirectory "$daemonDataDirectory" -PreviousInstallationID "$previousInstallationID" -InstallationID "$installationID" $3'
-  Pop $1
-  Pop $0
-  !insertmacro ciDiagnostic "dataTransition" "EXIT op=${OPERATION}"
+  Pop ${RESULT}
+  Pop $R0
+  ${if} ${RESULT} == "error"
+    StrCpy ${RESULT} -1
+  ${endif}
+  # A silent helper that fails has to leave its reason somewhere, and the diagnostic channel is
+  # the only surface that survives the installer deleting its own evidence.
+  !insertmacro ciDiagnostic "dataTransition" "EXIT op=${OPERATION} exit=${RESULT} out=[$R0]"
 !macroend
 
 !macro customPageAfterChangeDir
@@ -2006,10 +2031,13 @@ FunctionEnd
   ${if} $2 == 1
   ${andif} $migrateExistingData == ${BST_CHECKED}
     DetailPrint "$(migratingExistingData)"
-    !insertmacro executeDataTransition "Prepare"
-    ${if} $1 != 0
-      StrCpy $2 $1
-      !insertmacro executeDataTransition "Rollback"
+    # The gating state goes into the record: a Prepare that should not have run, and one that ran
+    # and failed, are indistinguishable from the outside otherwise.
+    !insertmacro ciDiagnostic "customInstallBeforeInstallationChanges" "Prepare gating: existing=$hasExistingInstallation layout=$hasInstallationLayout reinstall=$reinstallExistingInstallation legacyMigrate=$migrateLegacyApplicationData statePresent=$dataTransitionStatePresent"
+    !insertmacro executeDataTransition "Prepare" $R2
+    ${if} $R2 != 0
+      StrCpy $2 $R2
+      !insertmacro executeDataTransition "Rollback" $R2
       StrCpy $1 $2
       Abort "$(dataMigrationFailed)"
     ${endif}
@@ -2053,7 +2081,7 @@ FunctionEnd
     ${if} ${Errors}
       StrCpy $2 -1
     ${endif}
-    !insertmacro executeDataTransition "Rollback"
+    !insertmacro executeDataTransition "Rollback" $R2
     StrCpy $1 $5
     !insertmacro ciDiagnostic "customInstall" "rollback uninstaller exit=$2; original service install code=$1"
     ${if} $2 == 0
@@ -2076,8 +2104,11 @@ FunctionEnd
   ${if} $dataMigrationPrepared == 1
     DetailPrint "$(completingDataMigration)"
   ${endif}
-  !insertmacro executeDataTransition "Commit"
-  ${if} $1 != 0
+  # The result is read from its OWN register, not from $1. $1 is a live caller register here
+  # (customInstallBeforeInstallationChanges leaves the service-install code in it) and this macro
+  # no longer writes $1 at all, so testing $1 would test an unrelated value.
+  !insertmacro executeDataTransition "Commit" $R2
+  ${if} $R2 != 0
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(dataMigrationCleanupFailed)" /SD IDOK
   ${endif}
   StrCpy $4 0
