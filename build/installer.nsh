@@ -816,6 +816,7 @@ FunctionEnd
 !macroend
 
 !macro executeDaemonServiceCommand ACTION OPTIONS RESULT DETAILS
+  !insertmacro ciDiagnostic "serviceCommand" "ENTER action=${ACTION}"
   Delete "$PLUGINSDIR\service-command.log"
   StrCpy ${RESULT} -1
   StrCpy ${DETAILS} ""
@@ -839,6 +840,7 @@ FunctionEnd
     DetailPrint "${DETAILS}"
   ${endif}
   !insertmacro ciDiagnostic "service ${ACTION}" "exit=${RESULT} ${DETAILS}"
+  !insertmacro ciDiagnostic "serviceCommand" "EXIT action=${ACTION}"
 !macroend
 
 !macro confirmNativeArchitecture
@@ -869,6 +871,7 @@ FunctionEnd
 !macroend
 
 !macro customInit
+  !insertmacro ciDiagnostic "customInit" "ENTER"
   !insertmacro confirmNativeArchitecture
   !insertmacro setInstallationLayoutRegistryView
   StrCpy $allowUnsafeInstallation 0
@@ -998,6 +1001,7 @@ FunctionEnd
       Abort "$(dataMigrationCleanupFailed)"
     ${endif}
   ${endif}
+  !insertmacro ciDiagnostic "customInit" "EXIT"
 !macroend
 
 !macro customWelcomePage
@@ -1113,6 +1117,7 @@ FunctionEnd
 !macroend
 
 !macro executeDataTransition OPERATION
+  !insertmacro ciDiagnostic "dataTransition" "ENTER op=${OPERATION}"
   StrCpy $3 ""
   ${if} $migrateLegacyApplicationData == 1
     StrCpy $3 "-MigrateLegacyApplicationData"
@@ -1120,6 +1125,7 @@ FunctionEnd
   nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-data.ps1" -Operation ${OPERATION} -StatePath "$dataTransitionStatePath" -PreviousApplicationDataDirectory "$previousApplicationDataDirectory" -ApplicationDataDirectory "$applicationDataDirectory" -PreviousDaemonDataDirectory "$previousDaemonDataDirectory" -DaemonDataDirectory "$daemonDataDirectory" -PreviousInstallationID "$previousInstallationID" -InstallationID "$installationID" $3'
   Pop $1
   Pop $0
+  !insertmacro ciDiagnostic "dataTransition" "EXIT op=${OPERATION}"
 !macroend
 
 !macro customPageAfterChangeDir
@@ -1903,6 +1909,7 @@ FunctionEnd
 !macroend
 
 !macro customInstall
+  !insertmacro ciDiagnostic "customInstall" "ENTER"
   !insertmacro daemonExecutable $0
   SetDetailsPrint both
   DetailPrint "$(registeringService)"
@@ -1958,6 +1965,7 @@ FunctionEnd
   ${if} $4 == 1
     System::Call 'shell32::SHChangeNotify(i 0x8000000, i 0, i 0, i 0)'
   ${endif}
+  !insertmacro ciDiagnostic "customInstall" "EXIT"
 !macroend
 
 !macro customFinishPage
@@ -1969,15 +1977,18 @@ FunctionEnd
   !insertmacro MUI_PAGE_FINISH
 
   Function StartApp
+    !insertmacro ciDiagnostic "StartApp" "ENTER"
     ${if} ${isUpdated}
       StrCpy $1 "--updated"
     ${else}
       StrCpy $1 ""
     ${endif}
     ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
+    !insertmacro ciDiagnostic "StartApp" "RETURN"
   FunctionEnd
 
   Function createDesktopShortcut
+    !insertmacro ciDiagnostic "createDesktopShortcut" "ENTER"
     ${ifNot} ${FileExists} "$newDesktopLink"
       CreateShortCut "$newDesktopLink" "$appExe" "" "$appExe" 0 "" "" "${APP_DESCRIPTION}"
       ClearErrors
@@ -1987,6 +1998,7 @@ FunctionEnd
   FunctionEnd
 
   Function showDesktopShortcutFinishOption
+    !insertmacro ciDiagnostic "showDesktopShortcutFinishOption" "ENTER"
     ${if} ${isUpdated}
     ${andif} ${isForceRun}
       Call StartApp
@@ -2019,6 +2031,7 @@ FunctionEnd
   FunctionEnd
 
   Function leaveCustomFinishPage
+    !insertmacro ciDiagnostic "leaveCustomFinishPage" "ENTER"
     ${ifNot} ${RebootFlag}
       ${NSD_GetState} $finishRunCheckbox $0
       ${if} $0 == ${BST_CHECKED}
