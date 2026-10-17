@@ -52,21 +52,12 @@ function Write-InstallerOutput([string]$Value) {
     )
 }
 
-# A trace of a refused decision, appended to a fixed file so it can never replace the message the
-# user is about to be shown. Never throws: a trace that cannot be written must not become the
-# failure it was meant to explain.
-function Write-PreflightTrace([string]$Message, [hashtable]$Fields) {
-    try {
-        $lines = New-Object System.Collections.Generic.List[string]
-        $lines.Add("$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message")
-        foreach ($name in ($Fields.Keys | Sort-Object)) {
-            $lines.Add("  $name = $($Fields[$name])")
-        }
-        Add-Content -LiteralPath "$env:ProgramData\jiejiebox-installer\preflight-trace.txt" `
-            -Value $lines -Encoding UTF8 -ErrorAction SilentlyContinue
-    } catch {
-    }
-}
+# The refusal inputs are reported through `Write-InstallerOutput` (the "adoption gate:" line,
+# which CI's gate 6 and the coexistence gate both read) and through the message the user is shown.
+# A second, unread copy used to be appended to
+# `%ProgramData%\jijiebox-installer\preflight-trace.txt` on EVERY refused adoption - a file that no
+# workflow, script or doc reads (its own writer was the only reference in the tree). It was removed:
+# it wrote to a user's machine on every refusal for nobody's benefit.
 
 function Exit-Installer([int]$Code) {
     if (-not [string]::IsNullOrWhiteSpace($ResultCodePath)) {
@@ -982,30 +973,9 @@ try {
         try {
             Initialize-ApplicationDataDirectory $ApplicationDataDirectory $InstallationID -Adopted:$Adopted
         } catch {
-            # The refusal below is the one a user actually sees, and it says nothing about WHY the
-            # directory was refused. Record the inputs the decision used before reporting it. The
-            # trace must not throw here: it runs inside a catch, and a throw would replace the
-            # failure it was meant to explain.
-            try {
-                Write-PreflightTrace "PrepareApplicationDataDirectory failed: $($_.Exception.Message)" @{
-                    ApplicationDataDirectory = $ApplicationDataDirectory
-                    InstallationID           = $InstallationID
-                    Adopted                  = $Adopted.IsPresent
-                    DirectoryExists          = (Test-Path -LiteralPath $ApplicationDataDirectory)
-                    EntryCount               = $(if (Test-Path -LiteralPath $ApplicationDataDirectory) { @(Get-ChildItem -LiteralPath $ApplicationDataDirectory -Force).Count } else { -1 })
-                    LegacyVerdict            = (Get-LegacyLayoutDirectoryVerdict $ApplicationDataDirectory).Reason
-                    RegistryView             = $(try {
-                        $probe = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\SagerNet\sing-box")
-                        if ($null -eq $probe) { "key not found" } else {
-                            $result = "layout=$($probe.GetValue('LayoutVersion')) declared='$($probe.GetValue('ApplicationDataDirectory'))' id='$($probe.GetValue('InstallationID'))'"
-                            $probe.Dispose()
-                            $result
-                        }
-                    } catch { "read failed: $($_.Exception.Message)" })
-                    ProcessIs64Bit           = [Environment]::Is64BitProcess
-                }
-            } catch {
-            }
+            # The message below is what the user sees; the decision inputs are reported
+            # through the "adoption gate:" line that Write-InstallerOutput emits above, which
+            # CI's gate 6 and the coexistence gate both read.
             Write-InstallerOutput $_.Exception.Message
             Exit-Installer 25
         }
