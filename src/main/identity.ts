@@ -9,7 +9,7 @@
 //
 // They therefore all say `jiejiebox`, and the upstream client keeps the `sing-box` values
 // it shipped with. This is deliberately NOT a rename of the product: `productName` is
-// already Jiejiebox and everything a user reads comes from there.
+// already JiejieBox and everything a user reads comes from there.
 //
 // ---------------------------------------------------------------------------
 // What is deliberately NOT isolated here, and why

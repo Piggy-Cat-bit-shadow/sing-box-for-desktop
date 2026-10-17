@@ -1,4 +1,4 @@
-productName: Jiejiebox
+productName: JiejieBox
 copyright: nekohasekai
 publish: null
 afterPack: scripts/afterPack.cjs
