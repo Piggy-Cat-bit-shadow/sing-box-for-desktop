@@ -34,8 +34,13 @@ import { userAgent } from "./userAgent";
 // This used to be applied by the parent repository as a build-time overlay. It is source now: the
 // repository is spelled out rather than derived, because a placeholder that survived into a build
 // would be a silent failure, and a value injected by a build step is a value that can go missing.
+//
+// The QUERY strategy below is upstream's, adopted with this merge: one request per check -
+// `/releases/latest` for the stable track, the three newest releases for the beta track - instead
+// of walking a hundred-release page (upstream's RELEASES_PER_PAGE had no other user and is gone).
+// It stays correct for this feed because every release published here carries the Jiejiebox
+// installer asset that findWindowsAsset requires.
 const RELEASES_URL = "https://api.github.com/repos/Piggy-Cat-bit-shadow/sing-box/releases";
-const RELEASES_PER_PAGE = 100;
 const RELEASES_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
 const EXIT_CODE_CANCELLED = 1223;
 const EXIT_CODE_LAUNCH_FAILED = 1224;
@@ -206,34 +211,32 @@ interface GitHubRelease {
 }
 
 async function fetchReleases(track: UpdateTrack, githubToken: string): Promise<GitHubRelease[]> {
-  const releases: GitHubRelease[] = [];
   const headers = new Headers({
     "Accept": "application/vnd.github+json",
     "User-Agent": userAgent(),
   });
   const token = githubToken.trim();
   if (token !== "") {
-    headers.set("Authorization", `token ${token}`);
+    headers.set("Authorization", `Bearer ${token}`);
   }
-  let page = 1;
-  for (;;) {
-    const response = await fetch(
-      `${RELEASES_URL}?per_page=${RELEASES_PER_PAGE}&page=${page}`,
-      {
-        headers,
-        signal: AbortSignal.timeout(RELEASES_REQUEST_TIMEOUT_MILLISECONDS),
-      },
-    );
-    if (!response.ok) {
-      throw new Error(`fetch releases: HTTP ${response.status}`);
-    }
-    const pageReleases = (await response.json()) as GitHubRelease[];
-    releases.push(...pageReleases);
-    if (track !== "stable" || pageReleases.length < RELEASES_PER_PAGE) {
-      return releases;
-    }
-    page += 1;
+  // Upstream's "reduce GitHub API requests" shape, kept verbatim: one request per check, and the
+  // stable track asks for the LATEST release rather than paging the whole feed. It reads this
+  // fork's RELEASES_URL above, and every release published here carries the Jiejiebox installer
+  // that findWindowsAsset requires, so `/latest` names a release this matcher can recognise.
+  const response = await fetch(
+    track === "stable" ? `${RELEASES_URL}/latest` : `${RELEASES_URL}?per_page=3`,
+    {
+      headers,
+      signal: AbortSignal.timeout(RELEASES_REQUEST_TIMEOUT_MILLISECONDS),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`fetch releases: HTTP ${response.status}`);
   }
+  if (track === "stable") {
+    return [(await response.json()) as GitHubRelease];
+  }
+  return (await response.json()) as GitHubRelease[];
 }
 
 function findWindowsAsset(assets: GitHubAsset[]): GitHubAsset | null {

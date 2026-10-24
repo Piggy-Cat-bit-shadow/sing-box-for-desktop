@@ -948,13 +948,11 @@ FunctionEnd
 !macro refreshDesktopShortcutIfPresent NEW_LINK OLD_LINK REFRESHED
   StrCpy $7 0
   ${if} ${FileExists} "${NEW_LINK}"
-    WinShell::UninstShortcut "${NEW_LINK}"
     Delete "${NEW_LINK}"
     StrCpy $7 1
   ${endif}
   ${if} "${OLD_LINK}" != "${NEW_LINK}"
   ${andif} ${FileExists} "${OLD_LINK}"
-    WinShell::UninstShortcut "${OLD_LINK}"
     Delete "${OLD_LINK}"
     StrCpy $7 1
   ${endif}
@@ -1045,6 +1043,29 @@ FunctionEnd
       Abort
     architectureMismatchAccepted:
   ${endif}
+!macroend
+
+!macro preInit
+  !ifndef BUILD_UNINSTALLER
+    !insertmacro restoreInstallerRegistryView
+    ReadRegStr $0 HKLM "${INSTALL_REGISTRY_KEY}" "InstallLocation"
+    ${if} $0 != ""
+      StrLen $1 $0
+      StrCpy $1 $EXEPATH $1
+      # Previously released uninstallers terminate every process whose image path starts with the install location string.
+      ${if} $1 == $0
+        InitPluginsDir
+        CopyFiles /SILENT "$EXEPATH" "$PLUGINSDIR\installer.exe"
+        ${GetParameters} $1
+        ClearErrors
+        ExecWait '"$PLUGINSDIR\installer.exe" $1' $2
+        ${ifNot} ${Errors}
+          SetErrorLevel $2
+          Quit
+        ${endif}
+      ${endif}
+    ${endif}
+  !endif
 !macroend
 
 !macro customInit
