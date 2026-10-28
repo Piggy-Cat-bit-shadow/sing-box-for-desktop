@@ -25,7 +25,7 @@ import {
   fetchRemoteProfile,
   type FetchLike,
 } from "./subscriptionFetch";
-import { SUBSCRIPTION_QUOTA_COMPATIBILITY_USER_AGENTS } from "./subscription";
+import { SUBSCRIPTION_QUOTA_COMPATIBILITY_USER_AGENTS, SUBSCRIPTION_USER_AGENT } from "./subscription";
 
 const USER_AGENT = "SFW (sing-box 0.1.5; language en_US)";
 const PROFILE_URL = "https://provider.test/sub?token=abc";
@@ -70,6 +70,18 @@ function stubFetch(
   };
   return { fetch: fetchImplementation, requests };
 }
+
+describe("subscription User-Agent", () => {
+  it("is the fixed sing-box identity carried by the body request", async () => {
+    const { fetch, requests } = stubFetch(() => ({ body: VALID_CONFIG_A }));
+    await fetchRemoteProfile(PROFILE_URL, {
+      userAgent: SUBSCRIPTION_USER_AGENT,
+      fetchImplementation: fetch,
+    });
+    assert.equal(SUBSCRIPTION_USER_AGENT, "sing-box/1.15.0");
+    assert.equal(requests[0].userAgent, "sing-box/1.15.0");
+  });
+});
 
 describe("fetchRemoteProfile", () => {
   it("returns the body and the quota from a single request", async () => {

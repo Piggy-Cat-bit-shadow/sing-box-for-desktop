@@ -15,7 +15,7 @@ import type {
   ProfilesState,
 } from "../shared/ipc";
 import { fetchRemoteProfile } from "../shared/subscriptionFetch";
-import type { SubscriptionQuotaUpdate } from "../shared/subscription";
+import { SUBSCRIPTION_USER_AGENT, type SubscriptionQuotaUpdate } from "../shared/subscription";
 import { writeApplicationCacheFile } from "./appCache";
 import { desktopService } from "./daemon";
 import { Preference, settingsDatabase } from "./database";
@@ -25,7 +25,6 @@ import {
   deleteSubscriptionQuota,
   readSubscriptionQuota,
 } from "./subscriptionStorage";
-import { userAgent } from "./userAgent";
 import { applicationService } from "./worker";
 import { daemonState } from "./state";
 
@@ -204,7 +203,7 @@ async function checkConfig(content: string): Promise<void> {
 // ../shared/subscriptionFetch, where it can be tested against a stubbed fetch. What stays
 // here is the part that needs the settings database, the daemon and this app's policy.
 function remoteProfileRequest(remoteUrl: string) {
-  return fetchRemoteProfile(remoteUrl, { userAgent: userAgent() });
+  return fetchRemoteProfile(remoteUrl, { userAgent: SUBSCRIPTION_USER_AGENT });
 }
 
 async function insertProfile(

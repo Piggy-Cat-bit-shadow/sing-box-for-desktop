@@ -177,6 +177,15 @@ export function hasSubscriptionQuota(quota: ParsedSubscriptionQuota | undefined)
 export const SUBSCRIPTION_USER_INFO_HEADER = "subscription-userinfo";
 
 /**
+ * The User-Agent every subscription body request carries on first import and every update.
+ *
+ * Fixed independently of the app's own identity: panels identify subscription clients by this
+ * stable string, while GitHub updates, rule-set downloads and every other request keep the
+ * app's own User-Agent.
+ */
+export const SUBSCRIPTION_USER_AGENT = "sing-box/1.15.0";
+
+/**
  * The User-Agents tried, in order, ONLY to recover the quota header.
  *
  * Some providers send `subscription-userinfo` only to clients they recognise, and return the
