@@ -137,8 +137,12 @@ export type ProfileType = "local" | "remote";
 // Imported for use below AND re-exported, because `export type { X } from "..."` is a pure
 // re-export: it binds nothing locally, so `ProfileMetadata` could not name it.
 import type { SubscriptionQuota as ProfileSubscriptionQuota } from "./subscription";
+import type { RemoteProfileUpdate } from "./remoteUpdate";
 
 export type { ProfileSubscriptionQuota };
+
+/** The two halves of a remote update travel to the renderer as one structured result. */
+export type { RemoteProfileUpdate };
 
 export interface ProfileMetadata {
   id: string;
@@ -181,7 +185,7 @@ export interface ProfilesBridge {
   select(id: string): Promise<void>;
   readContent(id: string): Promise<string>;
   writeContent(id: string, content: string): Promise<void>;
-  updateRemote(id: string): Promise<void>;
+  updateRemote(id: string): Promise<RemoteProfileUpdate>;
   startService(): Promise<void>;
   takeOverService(): Promise<void>;
   pickImportFile(): Promise<{ fileName: string; data: Uint8Array } | null>;

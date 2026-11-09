@@ -1,4 +1,4 @@
-import { ConnectError } from "@connectrpc/connect";
+import { ConnectError, Code } from "@connectrpc/connect";
 import { BrowserWindow, app, dialog, ipcMain } from "electron";
 import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -14,10 +14,16 @@ import type {
   ProfilesResult,
   ProfilesState,
 } from "../shared/ipc";
+import {
+  describeProviderRefresh,
+  type RemoteProfileConfigUpdate,
+  type RemoteProfileProviderUpdate,
+  type RemoteProfileUpdate,
+} from "../shared/remoteUpdate";
 import { fetchRemoteProfile } from "../shared/subscriptionFetch";
 import { SUBSCRIPTION_USER_AGENT, type SubscriptionQuotaUpdate } from "../shared/subscription";
 import { writeApplicationCacheFile } from "./appCache";
-import { desktopService } from "./daemon";
+import { desktopService, startedService } from "./daemon";
 import { Preference, settingsDatabase } from "./database";
 import { serviceStartOptions } from "./settings";
 import {
@@ -339,37 +345,107 @@ function intervalOrDefault(profile: ProfileMetadata): number {
   return DEFAULT_UPDATE_INTERVAL_MINUTES;
 }
 
-function updateRemoteProfile(id: string): Promise<void> {
-  return runProfileOperation(id, async () => {
+function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
+  return runProfileOperation(id, async (): Promise<RemoteProfileUpdate> => {
     const profile = findProfile(id);
     if (profile.type !== "remote" || !profile.remoteUrl) {
       throw new Error("not a remote profile");
     }
-    const remote = await remoteProfileRequest(profile.remoteUrl);
+    // The provider half is independent of the body half, but it may only run on an instance that
+    // belongs to this operation. A profile that is not selected has no such instance.
+    const selected = () => selectedProfileId() === id && daemonState.status === ServiceStatus_Type.STARTED;
+    const providerHalf = async (): Promise<RemoteProfileProviderUpdate> =>
+      selected() ? await refreshProvidersOnLiveInstance() : { status: "not-active" };
+
+    let remote: Awaited<ReturnType<typeof remoteProfileRequest>>;
+    try {
+      remote = await remoteProfileRequest(profile.remoteUrl);
+    } catch (error) {
+      return {
+        profileId: id,
+        changed: false,
+        config: { status: "download-failed", detail: describeError(error) },
+        providers: await providerHalf(),
+      };
+    }
     // Validation runs BEFORE anything is committed, and it is the only gate. A provider that
     // answers HTTP 200 with a valid-looking quota header and an error page for a body must
     // leave the profile exactly as it was: a quota snapshot persisted first would be a
-    // freshness claim about an update that then failed.
-    await checkConfig(remote.content);
-    const store = settingsDatabase();
+    // freshness claim about an update that then failed. The provider half still runs because
+    // the old, still-selected instance is a different failure domain.
     try {
-      const oldContent = await readFile(contentPath(profile.id), "utf-8");
-      if (oldContent !== remote.content) {
-        await atomicWriteFile(contentPath(profile.id), remote.content);
-        await reloadIfSelectedAndRunning(profile.id);
-      }
+      await checkConfig(remote.content);
+    } catch (error) {
+      return {
+        profileId: id,
+        changed: false,
+        config: { status: "invalid-config", detail: describeError(error) },
+        providers: await providerHalf(),
+      };
+    }
+
+    let oldContent: string | null = null;
+    try {
+      oldContent = await readFile(contentPath(profile.id), "utf-8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
       }
-      await atomicWriteFile(contentPath(profile.id), remote.content);
-      await reloadIfSelectedAndRunning(profile.id);
     }
+    const changed = oldContent !== remote.content;
+    let config: RemoteProfileConfigUpdate;
+    let providers: RemoteProfileProviderUpdate;
+    if (changed) {
+      await atomicWriteFile(contentPath(profile.id), remote.content);
+      if (selectedProfileId() !== id) {
+        config = { status: "saved" };
+        providers = { status: "not-active" };
+      } else if (daemonState.status !== ServiceStatus_Type.STARTED) {
+        config = { status: "saved" };
+        providers = { status: "not-running" };
+      } else {
+        const previousStartedAt = await currentStartedAt();
+        let applied = false;
+        try {
+          await startServiceWithContent(remote.content);
+          const startedAt = await currentStartedAt();
+          // `startedAt` is the daemon's own per-Box timestamp, reset on every successful start or
+          // reload. A returned RPC alone is not an applied config; a moved timestamp is the daemon
+          // saying a new instance exists.
+          applied = startedAt !== null && startedAt > 0n && (previousStartedAt === null || startedAt > previousStartedAt);
+          config = {
+            status: applied ? "applied" : "apply-unconfirmed",
+            previousStartedAt: previousStartedAt?.toString(),
+            startedAt: startedAt?.toString(),
+          };
+        } catch (error) {
+          config = { status: "apply-failed", detail: describeError(error) };
+        }
+        if (selectedProfileId() !== id) {
+          config = { status: "superseded", detail: config.detail };
+          providers = { status: "not-active" };
+        } else {
+          // Refresh whichever instance is live now. On a successful apply this is the new Box; on a
+          // failed/unconfirmed reload it is the old one when it survived. The refresh itself is what
+          // proves the instance is reachable, so it runs after the reload in both cases.
+          providers = await refreshProvidersOnLiveInstance();
+          if (applied && providers.status === "box-changed") {
+            // The Box was replaced again while the refresh ran: the two halves describe different
+            // instances, so the provider result is not this update's.
+            providers = { status: "box-changed", detail: "box changed during the provider refresh" };
+          }
+        }
+      }
+    } else {
+      config = { status: "unchanged" };
+      providers = await providerHalf();
+    }
+
+    const store = settingsDatabase();
     store
       .prepare("UPDATE profiles SET last_updated = ? WHERE id = ?")
       .run(Date.now(), profile.id);
-    // Deliberately OUTSIDE the `oldContent !== remote.content` branch above, and after the
-    // content write rather than before it.
+    // Deliberately OUTSIDE the body branch above, and after the content write rather than before it.
     //
     // Outside it, because the two move independently in practice: a subscription whose node
     // list has not changed still consumes traffic, so `body unchanged` is the NORMAL case for
@@ -381,7 +457,60 @@ function updateRemoteProfile(id: string): Promise<void> {
     // SUCCESSFUL update happened.
     applySubscriptionQuota(profile.id, remote.quota);
     notifyChanged();
+    return { profileId: id, changed, config, providers };
   });
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The daemon's per-Box start timestamp, or null when the daemon is unreachable. */
+async function currentStartedAt(): Promise<bigint | null> {
+  if (startedService === null) {
+    return null;
+  }
+  try {
+    return (await startedService.getStartedAt({})).startedAt;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refreshes the remote providers of the live, selected instance.
+ *
+ * The result names the reason there is no report instead of claiming an empty success: an old
+ * daemon (Unimplemented), a stopped instance, and a failed RPC are three different facts. The
+ * protobuf response is mapped field-for-field into the shared summarizer, which is where the
+ * partial-application rule (published + pending_tags) lives.
+ */
+async function refreshProvidersOnLiveInstance(): Promise<RemoteProfileProviderUpdate> {
+  if (startedService === null) {
+    return { status: "unsupported" };
+  }
+  if (daemonState.status !== ServiceStatus_Type.STARTED) {
+    return { status: "not-running" };
+  }
+  try {
+    const response = await startedService.refreshRemoteProviders({ tags: [], timeoutMs: 15_000n });
+    return describeProviderRefresh({
+      results: response.results.map((result) => ({
+        tag: result.tag,
+        status: result.status,
+        pendingTags: [...result.pendingTags],
+        restartRequired: result.restartRequired,
+        reason: result.reason,
+      })),
+      cancelled: response.cancelled,
+      boxChanged: response.boxChanged,
+    });
+  } catch (error) {
+    if (error instanceof ConnectError && error.code === Code.Unimplemented) {
+      return { status: "unsupported" };
+    }
+    return { status: "unavailable", detail: describeError(error) };
+  }
 }
 
 export async function selectProfile(id: string): Promise<void> {
@@ -428,7 +557,18 @@ async function runDueProfileUpdates(): Promise<void> {
     dueProfiles.map(async (profile) => {
       lastUpdateAttempts.set(profile.id, now);
       try {
-        await updateRemoteProfile(profile.id);
+        const result = await updateRemoteProfile(profile.id);
+        // The scheduled path has no UI. A structured failure must still be visible in the log; the
+        // old shape rethrew and was caught here, but the new one returns the outcome.
+        if (result.config.status !== "unchanged" && result.config.status !== "applied") {
+          console.error(
+            `update profile ${profile.name}: ${result.config.status}`,
+            result.config.detail ?? "",
+          );
+        }
+        if (result.providers.status === "failed" || result.providers.status === "unavailable") {
+          console.error(`refresh providers for ${profile.name}: ${result.providers.status}`);
+        }
       } catch (error) {
         console.error(`update profile ${profile.name}:`, error);
       }
