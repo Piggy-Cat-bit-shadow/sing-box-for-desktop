@@ -24,7 +24,7 @@
 
 import assert from "node:assert/strict";
 import { createServer } from "node:http2";
-import type { Server } from "node:http2";
+import type { Http2Server } from "node:http2";
 import { after, before, describe, it } from "node:test";
 
 import { Code, ConnectError, createClient } from "@connectrpc/connect";
@@ -46,7 +46,7 @@ async function loadGeneratedService() {
 const generated = await loadGeneratedService();
 const suite = generated === null ? describe.skip : describe;
 
-let server: Server;
+let server: Http2Server;
 let baseUrl: string;
 
 before(async () => {
@@ -102,7 +102,7 @@ after(async () => {
 function client() {
   return createClient(
     generated!.StartedService,
-    createGrpcTransport({ baseUrl, httpVersion: "2" }),
+    createGrpcTransport({ baseUrl }),
   );
 }
 
@@ -162,7 +162,7 @@ suite("configuration documents over gRPC", () => {
       generated!.StartedService,
       createGrpcTransport({
         baseUrl: `http://127.0.0.1:${address.port}`,
-        httpVersion: "2",
+        
       }),
     );
     await new Promise<void>((resolve, reject) => {
