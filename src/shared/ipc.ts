@@ -54,6 +54,7 @@ export interface DaemonBridge {
 
 export const PROFILES_CALL = "profiles:call";
 export const PROFILES_CHANGED = "profiles:changed";
+export const CONFIGURATION_CALL = "configuration:call";
 export const SERVERS_CALL = "servers:call";
 export const PREFERENCES_CALL = "preferences:call";
 export const PREFERENCES_CHANGED = "preferences:changed";
@@ -138,6 +139,12 @@ export type ProfileType = "local" | "remote";
 // re-export: it binds nothing locally, so `ProfileMetadata` could not name it.
 import type { SubscriptionQuota as ProfileSubscriptionQuota } from "./subscription";
 import type { RemoteProfileUpdate } from "./remoteUpdate";
+import type {
+  ConfigRecoveryInfo,
+  ConfigurationDocument,
+  ServiceChangePlan,
+  ServiceChangeReport,
+} from "./configDocuments";
 
 export type { ProfileSubscriptionQuota };
 
@@ -195,6 +202,22 @@ export interface ProfilesBridge {
   exportData(id: string): Promise<boolean>;
   encodeData(id: string): Promise<Uint8Array>;
   onChanged(listener: () => void): () => void;
+}
+
+/**
+ * The daemon's configuration documents, reached through the shell.
+ *
+ * Separate from `ProfilesBridge` because these calls need a STARTED service and answer about the
+ * running instance, while the profile bridge owns the stored documents. Separate from the
+ * application service's `checkConfig` because that one validates a document with no Box at all.
+ */
+export interface ConfigurationBridge {
+  /** What applying `content` would mean for the running instance (a plan, not a commit). */
+  previewChange(content: string): Promise<ConfigurationDocument<ServiceChangePlan>>;
+  /** What the last apply attempt planned and did. */
+  lastServiceChange(): Promise<ConfigurationDocument<ServiceChangeReport>>;
+  /** The last recovery from a failed start, or `absent` when the last start was normal. */
+  lastConfigRecovery(): Promise<ConfigurationDocument<ConfigRecoveryInfo>>;
 }
 
 export interface ServersBridge {
@@ -467,6 +490,7 @@ export interface DesktopBridge {
   core: CoreBridge;
   reports: ReportsBridge;
   profiles: ProfilesBridge;
+  configuration: ConfigurationBridge;
   servers: ServersBridge;
   preferences: PreferencesBridge;
   terminal: TerminalBridge;

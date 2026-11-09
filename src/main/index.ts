@@ -26,6 +26,7 @@ import {
 import type { RuntimeCrashCaptureResult } from "./appReports";
 import { registerApplication } from "./application";
 import { registerDaemonBridge } from "./bridge";
+import { registerConfiguration } from "./configuration";
 import { registerCore } from "./core";
 import { settingsDatabase } from "./database";
 import { developmentRendererURL, developmentSwitchValue } from "./development";
@@ -522,6 +523,7 @@ if (!singleInstanceLock) {
     registerReports();
     registerPreferences();
     registerProfiles();
+    registerConfiguration();
     registerServers();
     registerSettings(updateTrayVisibility);
     registerTaildrop();

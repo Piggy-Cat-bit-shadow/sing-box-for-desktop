@@ -785,8 +785,8 @@ const handlers: Record<
     });
   },
 
-  async updateRemote(id: string): Promise<void> {
-    await updateRemoteProfile(id);
+  async updateRemote(id: string): Promise<RemoteProfileUpdate> {
+    return await updateRemoteProfile(id);
   },
 
   async startService(): Promise<void> {

@@ -139,6 +139,9 @@ export function createDesktopHost(): DesktopHost {
         }
         return configSchemaPromise;
       },
+      previewChange: (content) => bridge.configuration.previewChange(content),
+      lastServiceChange: () => bridge.configuration.lastServiceChange(),
+      lastConfigRecovery: () => bridge.configuration.lastConfigRecovery(),
     },
     tools: {
       startStandaloneNetworkQualityTest: (request, options) =>

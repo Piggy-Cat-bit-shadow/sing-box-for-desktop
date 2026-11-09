@@ -5,6 +5,7 @@ import {
   APP_CALL,
   APP_NAVIGATE,
   APP_TITLE_BAR_OVERLAY,
+  CONFIGURATION_CALL,
   CORE_CALL,
   DAEMON_RETRY,
   DAEMON_STATE_CHANGED,
@@ -90,6 +91,10 @@ function callCore<T>(method: string, ...callArguments: unknown[]): Promise<T> {
 
 function callReports<T>(method: string, ...callArguments: unknown[]): Promise<T> {
   return callResult(REPORTS_CALL, method, ...callArguments);
+}
+
+function callConfiguration<T>(method: string, ...callArguments: unknown[]): Promise<T> {
+  return callResult(CONFIGURATION_CALL, method, ...callArguments);
 }
 
 let updatePresentationPending = false;
@@ -201,6 +206,11 @@ const bridge: DesktopBridge = {
         ipcRenderer.removeListener(PROFILES_CHANGED, handler);
       };
     },
+  },
+  configuration: {
+    previewChange: (content) => callConfiguration("previewChange", content),
+    lastServiceChange: () => callConfiguration("lastServiceChange"),
+    lastConfigRecovery: () => callConfiguration("lastConfigRecovery"),
   },
   servers: {
     load: () => callServers("load"),
