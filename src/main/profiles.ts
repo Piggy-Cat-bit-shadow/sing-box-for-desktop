@@ -22,7 +22,9 @@ import {
 } from "../shared/remoteUpdate";
 import {
   applyOwnedConfig,
+  classifyProviderBinding,
   instanceStillOurs,
+  type LiveInstance,
   type OwnershipProbe,
 } from "../shared/remoteApply";
 import { fetchRemoteProfile } from "../shared/subscriptionFetch";
@@ -156,7 +158,17 @@ function selectedProfileId(): string | null {
   return selectedProfilePreference.get();
 }
 
+let selectionEpoch = 0;
+
+/** Monotonic on every selected-profile write, so A -> B -> A is not "unchanged". */
+function selectedEpoch(): number {
+  return selectionEpoch;
+}
+
 function writeSelectedProfileId(id: string | null): void {
+  if (selectedProfileId() !== id) {
+    selectionEpoch += 1;
+  }
   selectedProfilePreference.set(id);
 }
 
@@ -370,6 +382,7 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
     // pinned daemon has no applied-revision receipt, so a moved timestamp proves a different Box
     // existed, never that it consumed this body.
     const startedAtAtStart = await currentStartedAt();
+    const epochAtStart = selectedEpoch();
     // The provider half is independent of the body half, but it may only run on an instance that
     // belongs to this operation. A profile that is not selected has no such instance, and an
     // instance that was replaced during the update is not ours either.
@@ -381,7 +394,17 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
         return { status: "not-running" };
       }
       const current = await currentStartedAt();
-      if (!instanceStillOurs(id, selectedProfileId(), true, startedAtAtStart?.toString() ?? null, current?.toString() ?? null)) {
+      if (
+        !instanceStillOurs(
+          id,
+          selectedProfileId(),
+          true,
+          startedAtAtStart?.toString() ?? null,
+          current?.toString() ?? null,
+          epochAtStart,
+          selectedEpoch(),
+        )
+      ) {
         return { status: "superseded", detail: "the instance changed during the update" };
       }
       return refreshProvidersOnLiveInstance();
@@ -427,7 +450,7 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
     let providers: RemoteProfileProviderUpdate;
     if (changed) {
       await atomicWriteFile(contentPath(profile.id), remote.content);
-      if (selectedProfileId() !== id) {
+      if (selectedProfileId() !== id || selectedEpoch() !== epochAtStart) {
         config = { status: "saved" };
         providers = { status: "not-active" };
       } else if (daemonState.status !== ServiceStatus_Type.STARTED) {
@@ -437,8 +460,11 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
         const probe: OwnershipProbe = {
           selectedProfileId: () => selectedProfileId(),
           running: () => daemonState.status === ServiceStatus_Type.STARTED,
+          selectionEpoch: () => selectedEpoch(),
           startedAt: async () => (await currentStartedAt())?.toString() ?? null,
           storedContent: () => readFile(contentPath(profile.id), "utf-8"),
+          targetRevision: (candidate) => targetRevisionFor(candidate),
+          appliedRevision: (expected) => lastActiveRevisionWaiting(expected),
         };
         // Every await inside this call is a place the selection can move. The start callback gets a
         // guard that runs after start options are resolved and before the daemon is told anything.
@@ -455,7 +481,7 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
           startedAt: result.startedAt,
           detail: result.detail,
         };
-        if (selectedProfileId() !== id) {
+        if (selectedProfileId() !== id || selectedEpoch() !== epochAtStart) {
           config = { status: "superseded", detail: config.detail };
           providers = { status: "not-active" };
         } else if (result.status === "superseded") {
@@ -464,16 +490,35 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
           providers = { status: "superseded", detail: result.detail };
         } else if (daemonState.status !== ServiceStatus_Type.STARTED) {
           providers = { status: "not-running" };
-        } else {
-          // Refresh whichever instance is live now. On a successful apply this is the new Box; on a
-          // failed/unconfirmed reload it is the old one when it survived. The refresh itself is what
-          // proves the instance is reachable, so it runs after the reload in both cases.
-          providers = await refreshProvidersOnLiveInstance();
-          if (result.status === "applied" && providers.status === "box-changed") {
-            // The Box was replaced again while the refresh ran: the two halves describe different
-            // instances, so the provider result is not this update's.
-            providers = { status: "box-changed", detail: "box changed during the provider refresh" };
+        } else if (result.status === "applied") {
+          // The daemon's service-change report named this exact revision. Bind the provider RPC to
+          // the same instance and revision, not merely to "the profile is still selected".
+          if (result.confirmedRevision === undefined || result.startedAt === undefined || result.confirmedEpoch === undefined) {
+            providers = { status: "superseded", detail: "the applied instance has no identity" };
+          } else {
+            providers = await refreshProvidersForInstance(
+              id,
+              result.startedAt,
+              result.confirmedEpoch,
+              result.confirmedRevision,
+            );
           }
+        } else if (result.status === "apply-failed" && result.previousStartedAt !== undefined) {
+          // The old Box may still serve. It is still only the one this operation started against.
+          providers = await refreshProvidersForInstance(
+            id,
+            result.previousStartedAt,
+            epochAtStart,
+            null,
+          );
+        } else {
+          // An unconfirmed reload has no single target: either the old or the new Box may be live,
+          // and the RPC cannot be told which one to refresh. Sending it anyway would attribute a
+          // report to an instance this operation never confirmed.
+          providers = {
+            status: "superseded",
+            detail: result.detail ?? "the applied instance is unknown",
+          };
         }
       }
     } else {
@@ -511,10 +556,56 @@ async function currentStartedAt(): Promise<bigint | null> {
     return null;
   }
   try {
-    return (await startedService.getStartedAt({})).startedAt;
+    const startedAt = (await startedService.getStartedAt({})).startedAt;
+    // 0 is the daemon's "no Box" value; it is not an instance identity.
+    return startedAt > 0n ? startedAt : null;
   } catch {
     return null;
   }
+}
+
+/** The daemon's revision for applying [content], or null when the daemon cannot answer. */
+async function targetRevisionFor(content: string): Promise<string | null> {
+  if (startedService === null) return null;
+  try {
+    const document = await startedService.previewServiceChange({ configContent: content });
+    const parsed: unknown = JSON.parse(document.json);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const target = (parsed as { targetRevision?: unknown }).targetRevision;
+    return typeof target === "string" && target !== "" ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The active revision from the daemon's last service-change report, or null. */
+async function lastActiveRevision(): Promise<string | null> {
+  if (startedService === null) return null;
+  try {
+    const document = await startedService.getLastServiceChange({});
+    const parsed: unknown = JSON.parse(document.json);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const active = (parsed as { activeRevision?: unknown }).activeRevision;
+    return typeof active === "string" && active !== "" ? active : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The active revision, waiting briefly for the start RPC's report to catch up.
+ *
+ * `startService` returning means the daemon accepted the start call, not that its service-change
+ * report has already been written. The report is the receipt this operation confirms against, so
+ * a short bounded poll distinguishes "not written yet" from "a different revision is serving".
+ */
+async function lastActiveRevisionWaiting(expected: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const active = await lastActiveRevision();
+    if (active === expected || active !== null) return active;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return await lastActiveRevision();
 }
 
 /**
@@ -551,6 +642,75 @@ async function refreshProvidersOnLiveInstance(): Promise<RemoteProfileProviderUp
     }
     return { status: "unavailable", detail: describeError(error) };
   }
+}
+
+/**
+ * Refreshes providers only while the instance this update confirmed is still the live one.
+ *
+ * The reload RPC has no expected-instance parameter, so the check immediately before the call is
+ * the strongest client-side binding available; the check after it prevents a result from being
+ * attributed to an instance that replaced the target while the RPC ran. When any identity is
+ * unknown (no start timestamp, no applied revision, an epoch change), the provider half is
+ * `superseded` and no RPC is sent.
+ */
+async function refreshProvidersForInstance(
+  profileId: string,
+  expectedStartedAt: string,
+  expectedEpoch: number,
+  expectedRevision: string | null,
+): Promise<RemoteProfileProviderUpdate> {
+  if (selectedProfileId() !== profileId) {
+    return { status: "not-active" };
+  }
+  if (daemonState.status !== ServiceStatus_Type.STARTED) {
+    return { status: "not-running" };
+  }
+  if (selectedEpoch() !== expectedEpoch) {
+    return { status: "superseded", detail: "selection changed before the provider refresh" };
+  }
+  const current = await currentStartedAt();
+  const beforeLive: LiveInstance = {
+    selectedProfileId: selectedProfileId(),
+    running: daemonState.status === ServiceStatus_Type.STARTED,
+    startedAt: current?.toString() ?? null,
+    selectionEpoch: selectedEpoch(),
+    revision: expectedRevision === null ? null : await lastActiveRevision(),
+  };
+  const before = classifyProviderBinding(
+    profileId,
+    expectedStartedAt,
+    expectedEpoch,
+    expectedRevision,
+    beforeLive,
+  );
+  if (before !== "ok") {
+    return {
+      status: before === "superseded" ? "superseded" : before,
+      detail:
+        before === "superseded"
+          ? "the instance or applied revision changed before the provider refresh"
+          : undefined,
+    };
+  }
+  const providers = await refreshProvidersOnLiveInstance();
+  const after = await currentStartedAt();
+  const afterLive: LiveInstance = {
+    selectedProfileId: selectedProfileId(),
+    running: daemonState.status === ServiceStatus_Type.STARTED,
+    startedAt: after?.toString() ?? null,
+    selectionEpoch: selectedEpoch(),
+    revision: expectedRevision === null ? null : await lastActiveRevision(),
+  };
+  if (
+    classifyProviderBinding(profileId, expectedStartedAt, expectedEpoch, expectedRevision, afterLive) !==
+    "ok"
+  ) {
+    return {
+      status: "superseded",
+      detail: "the instance changed during the provider refresh",
+    };
+  }
+  return providers;
 }
 
 export async function selectProfile(id: string): Promise<void> {

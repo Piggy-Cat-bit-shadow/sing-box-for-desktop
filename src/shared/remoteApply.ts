@@ -18,6 +18,10 @@ export interface ApplyResult {
   previousStartedAt?: string;
   startedAt?: string;
   detail?: string;
+  /** The daemon's revision for the bytes this operation confirmed, when it answered. */
+  confirmedRevision?: string;
+  /** Selection epoch that was current when the revision was confirmed. */
+  confirmedEpoch?: number;
 }
 
 export interface OwnershipProbe {
@@ -25,18 +29,23 @@ export interface OwnershipProbe {
   selectedProfileId: () => string | null;
   /** Whether the daemon reports a running service. */
   running: () => boolean;
+  /**
+   * Monotonic selection epoch. It moves on every selected-profile write, including A -> B -> A,
+   * where the id alone would compare equal at both ends.
+   */
+  selectionEpoch: () => number;
   /** The daemon's per-Box start timestamp, as a decimal string, or null. */
   startedAt: () => Promise<string | null>;
   /** The body currently stored for this profile. */
   storedContent: () => Promise<string>;
+  /** The daemon's target revision for [content], or null when it cannot answer. */
+  targetRevision?: (content: string) => Promise<string | null>;
+  /** Polls the daemon's active revision and returns the one it reports for [expected]. */
+  appliedRevision?: (expected: string) => Promise<string | null>;
 }
 
 function owns(profileId: string, probe: OwnershipProbe): boolean {
   return probe.selectedProfileId() === profileId && probe.running();
-}
-
-function moved(before: string | null, after: string | null): boolean {
-  return after !== null && after !== "0" && (before === null || BigInt(after) > BigInt(before));
 }
 
 /**
@@ -59,15 +68,38 @@ export async function applyOwnedConfig(
   start: (stillOwner: () => boolean) => Promise<boolean>,
   describe: (error: unknown) => string = defaultDescribe,
 ): Promise<ApplyResult> {
-  const before = await probe.startedAt();
-  if (!owns(profileId, probe)) {
+  const epochBefore = probe.selectionEpoch();
+  const stillOwner = () => owns(profileId, probe) && probe.selectionEpoch() === epochBefore;
+  let before: string | null;
+  try {
+    before = await probe.startedAt();
+  } catch (error) {
+    return { status: "apply-unconfirmed", detail: `instance identity unavailable: ${describe(error)}` };
+  }
+  if (!stillOwner()) {
     return { status: "superseded", detail: "selection changed before the start" };
+  }
+  if (probe.running() && before === null) {
+    // A running Box we cannot identify is not a baseline: accepting a later timestamp would let
+    // another operation's instance confirm this one.
+    return { status: "apply-unconfirmed", detail: "running instance identity unavailable" };
+  }
+  let expectedRevision: string | null = null;
+  if (probe.targetRevision !== undefined) {
+    try {
+      expectedRevision = await probe.targetRevision(content);
+    } catch {
+      expectedRevision = null;
+    }
+    if (!stillOwner()) {
+      return { status: "superseded", detail: "selection changed while reading the target revision" };
+    }
   }
   let started: boolean;
   try {
-    started = await start(() => owns(profileId, probe));
+    started = await start(stillOwner);
   } catch (error) {
-    if (!owns(profileId, probe)) {
+    if (!stillOwner()) {
       return { status: "superseded", detail: describe(error) };
     }
     return { status: "apply-failed", detail: describe(error), previousStartedAt: before ?? undefined };
@@ -79,8 +111,17 @@ export async function applyOwnedConfig(
       previousStartedAt: before ?? undefined,
     };
   }
-  const after = await probe.startedAt();
-  if (!owns(profileId, probe)) {
+  let after: string | null;
+  try {
+    after = await probe.startedAt();
+  } catch (error) {
+    return {
+      status: "apply-unconfirmed",
+      detail: `instance identity unavailable after the start: ${describe(error)}`,
+      previousStartedAt: before ?? undefined,
+    };
+  }
+  if (!stillOwner()) {
     return {
       status: "superseded",
       detail: "selection changed during the daemon start",
@@ -94,6 +135,27 @@ export async function applyOwnedConfig(
   } catch (error) {
     return { status: "apply-failed", detail: describe(error), previousStartedAt: before ?? undefined };
   }
+  // The last read is itself an await: A -> B -> A by id looks unchanged, and another start/reload
+  // can move the timestamp. Re-read both after the body and compare with what was confirmed.
+  let final: string | null;
+  try {
+    final = await probe.startedAt();
+  } catch (error) {
+    return {
+      status: "apply-unconfirmed",
+      detail: `instance identity unavailable while confirming: ${describe(error)}`,
+      previousStartedAt: before ?? undefined,
+      startedAt: after ?? undefined,
+    };
+  }
+  if (!stillOwner()) {
+    return {
+      status: "superseded",
+      detail: "selection changed during the final read",
+      previousStartedAt: before ?? undefined,
+      startedAt: after ?? undefined,
+    };
+  }
   if (disk !== content) {
     return {
       status: "superseded",
@@ -102,10 +164,57 @@ export async function applyOwnedConfig(
       startedAt: after ?? undefined,
     };
   }
+  if (final === null || final !== after) {
+    return {
+      status: "superseded",
+      detail: "the instance changed while confirming this update",
+      previousStartedAt: before ?? undefined,
+      startedAt: final ?? after ?? undefined,
+    };
+  }
+  let appliedRevision: string | null = null;
+  if (probe.appliedRevision !== undefined && expectedRevision !== null) {
+    try {
+      appliedRevision = await probe.appliedRevision(expectedRevision);
+    } catch {
+      appliedRevision = null;
+    }
+    if (!stillOwner()) {
+      return {
+        status: "superseded",
+        detail: "selection changed while reading the applied revision",
+        previousStartedAt: before ?? undefined,
+        startedAt: final,
+      };
+    }
+  }
+  if (expectedRevision !== null) {
+    if (appliedRevision === expectedRevision) {
+      return {
+        status: "applied",
+        confirmedRevision: expectedRevision,
+        confirmedEpoch: epochBefore,
+        previousStartedAt: before ?? undefined,
+        startedAt: final,
+      };
+    }
+    return {
+      status: "apply-unconfirmed",
+      detail:
+        appliedRevision === null
+          ? "the daemon has no applied-revision receipt"
+          : "the daemon is serving a different revision",
+      previousStartedAt: before ?? undefined,
+      startedAt: final,
+    };
+  }
+  // No revision contract on this daemon. A moved timestamp still proves a new Box existed, but
+  // never which document it consumed, so the most this operation may report is unconfirmed.
   return {
-    status: moved(before, after) ? "applied" : "apply-unconfirmed",
+    status: "apply-unconfirmed",
+    detail: "the daemon predates the applied-revision receipt",
     previousStartedAt: before ?? undefined,
-    startedAt: after ?? undefined,
+    startedAt: final,
   };
 }
 
@@ -122,13 +231,60 @@ export function instanceStillOurs(
   running: boolean,
   startedAtAtStart: string | null,
   currentStartedAt: string | null,
+  selectionEpochAtStart?: number,
+  currentSelectionEpoch?: number,
 ): boolean {
   return (
     selectedProfileId === profileId &&
     running &&
+    startedAtAtStart !== null &&
     currentStartedAt !== null &&
-    (startedAtAtStart === null || currentStartedAt === startedAtAtStart)
+    currentStartedAt === startedAtAtStart &&
+    (selectionEpochAtStart === undefined ||
+      currentSelectionEpoch === undefined ||
+      currentSelectionEpoch === selectionEpochAtStart)
   );
+}
+
+/** The live facts the provider half must match before it may send an RPC. */
+export interface LiveInstance {
+  selectedProfileId: string | null;
+  running: boolean;
+  startedAt: string | null;
+  selectionEpoch: number;
+  revision: string | null;
+}
+
+export type ProviderBinding = "ok" | "not-active" | "not-running" | "superseded";
+
+/**
+ * Classifies whether the provider RPC may still be attributed to the confirmed instance.
+ *
+ * Unlike [instanceStillOurs], an unknown expected start timestamp is never "ok": a provider call
+ * has no way to say which Box it wants, so "I could not identify the instance" must produce an
+ * explicit non-ok result instead of refreshing whatever is current. The same rule applies to the
+ * applied revision: `null` expected revision means this daemon has no receipt, and the caller must
+ * not claim the refresh belongs to this update.
+ */
+export function classifyProviderBinding(
+  profileId: string,
+  expectedStartedAt: string,
+  expectedEpoch: number,
+  expectedRevision: string | null,
+  live: LiveInstance,
+): ProviderBinding {
+  if (live.selectedProfileId !== profileId) return "not-active";
+  if (!live.running) return "not-running";
+  if (
+    expectedStartedAt === "" ||
+    live.startedAt === null ||
+    live.startedAt !== expectedStartedAt ||
+    live.selectionEpoch !== expectedEpoch
+  ) {
+    return "superseded";
+  }
+  if (expectedRevision !== null && live.revision !== expectedRevision) return "superseded";
+  return "ok";
 }
 
 function defaultDescribe(error: unknown): string {
