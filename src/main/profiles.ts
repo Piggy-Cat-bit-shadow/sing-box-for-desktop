@@ -20,6 +20,11 @@ import {
   type RemoteProfileProviderUpdate,
   type RemoteProfileUpdate,
 } from "../shared/remoteUpdate";
+import {
+  applyOwnedConfig,
+  instanceStillOurs,
+  type OwnershipProbe,
+} from "../shared/remoteApply";
 import { fetchRemoteProfile } from "../shared/subscriptionFetch";
 import { SUBSCRIPTION_USER_AGENT, type SubscriptionQuotaUpdate } from "../shared/subscription";
 import { writeApplicationCacheFile } from "./appCache";
@@ -315,14 +320,24 @@ async function encodeProfileData(id: string): Promise<Uint8Array> {
   return encoded.data;
 }
 
-async function startServiceWithContent(content: string): Promise<void> {
+async function startServiceWithContent(
+  content: string,
+  stillOwner: () => boolean = () => true,
+): Promise<boolean> {
   if (desktopService === null) {
     throw new Error("daemon is not available");
   }
+  const options = await serviceStartOptions();
+  // Start options are awaited: the selection can move while they are resolved. Check again
+  // immediately before the daemon call instead of applying an operation that no longer owns the UI.
+  if (!stillOwner()) {
+    return false;
+  }
   await desktopService.startService({
     configContent: content,
-    options: await serviceStartOptions(),
+    options,
   });
+  return true;
 }
 
 async function reloadIfSelectedAndRunning(id: string): Promise<void> {
@@ -351,11 +366,26 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
     if (profile.type !== "remote" || !profile.remoteUrl) {
       throw new Error("not a remote profile");
     }
+    // Instance identity at the moment this operation starts. It is only used as a signal: the
+    // pinned daemon has no applied-revision receipt, so a moved timestamp proves a different Box
+    // existed, never that it consumed this body.
+    const startedAtAtStart = await currentStartedAt();
     // The provider half is independent of the body half, but it may only run on an instance that
-    // belongs to this operation. A profile that is not selected has no such instance.
-    const selected = () => selectedProfileId() === id && daemonState.status === ServiceStatus_Type.STARTED;
-    const providerHalf = async (): Promise<RemoteProfileProviderUpdate> =>
-      selected() ? await refreshProvidersOnLiveInstance() : { status: "not-active" };
+    // belongs to this operation. A profile that is not selected has no such instance, and an
+    // instance that was replaced during the update is not ours either.
+    const providerHalf = async (): Promise<RemoteProfileProviderUpdate> => {
+      if (selectedProfileId() !== id) {
+        return { status: "not-active" };
+      }
+      if (daemonState.status !== ServiceStatus_Type.STARTED) {
+        return { status: "not-running" };
+      }
+      const current = await currentStartedAt();
+      if (!instanceStillOurs(id, selectedProfileId(), true, startedAtAtStart?.toString() ?? null, current?.toString() ?? null)) {
+        return { status: "superseded", detail: "the instance changed during the update" };
+      }
+      return refreshProvidersOnLiveInstance();
+    };
 
     let remote: Awaited<ReturnType<typeof remoteProfileRequest>>;
     try {
@@ -404,32 +434,42 @@ function updateRemoteProfile(id: string): Promise<RemoteProfileUpdate> {
         config = { status: "saved" };
         providers = { status: "not-running" };
       } else {
-        const previousStartedAt = await currentStartedAt();
-        let applied = false;
-        try {
-          await startServiceWithContent(remote.content);
-          const startedAt = await currentStartedAt();
-          // `startedAt` is the daemon's own per-Box timestamp, reset on every successful start or
-          // reload. A returned RPC alone is not an applied config; a moved timestamp is the daemon
-          // saying a new instance exists.
-          applied = startedAt !== null && startedAt > 0n && (previousStartedAt === null || startedAt > previousStartedAt);
-          config = {
-            status: applied ? "applied" : "apply-unconfirmed",
-            previousStartedAt: previousStartedAt?.toString(),
-            startedAt: startedAt?.toString(),
-          };
-        } catch (error) {
-          config = { status: "apply-failed", detail: describeError(error) };
-        }
+        const probe: OwnershipProbe = {
+          selectedProfileId: () => selectedProfileId(),
+          running: () => daemonState.status === ServiceStatus_Type.STARTED,
+          startedAt: async () => (await currentStartedAt())?.toString() ?? null,
+          storedContent: () => readFile(contentPath(profile.id), "utf-8"),
+        };
+        // Every await inside this call is a place the selection can move. The start callback gets a
+        // guard that runs after start options are resolved and before the daemon is told anything.
+        const result = await applyOwnedConfig(
+          id,
+          remote.content,
+          probe,
+          (stillOwner) => startServiceWithContent(remote.content, stillOwner),
+          describeError,
+        );
+        config = {
+          status: result.status,
+          previousStartedAt: result.previousStartedAt,
+          startedAt: result.startedAt,
+          detail: result.detail,
+        };
         if (selectedProfileId() !== id) {
           config = { status: "superseded", detail: config.detail };
           providers = { status: "not-active" };
+        } else if (result.status === "superseded") {
+          // The profile is still selected but the body/startedAt was replaced by another operation
+          // for this same profile. That operation owns the provider half.
+          providers = { status: "superseded", detail: result.detail };
+        } else if (daemonState.status !== ServiceStatus_Type.STARTED) {
+          providers = { status: "not-running" };
         } else {
           // Refresh whichever instance is live now. On a successful apply this is the new Box; on a
           // failed/unconfirmed reload it is the old one when it survived. The refresh itself is what
           // proves the instance is reachable, so it runs after the reload in both cases.
           providers = await refreshProvidersOnLiveInstance();
-          if (applied && providers.status === "box-changed") {
+          if (result.status === "applied" && providers.status === "box-changed") {
             // The Box was replaced again while the refresh ran: the two halves describe different
             // instances, so the provider result is not this update's.
             providers = { status: "box-changed", detail: "box changed during the provider refresh" };

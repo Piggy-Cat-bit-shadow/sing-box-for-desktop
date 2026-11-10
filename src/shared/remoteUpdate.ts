@@ -62,6 +62,8 @@ export type ProviderUpdateStatus =
   | "not-active"
   /** The selected profile is not running; a refresh would have no Box to reach. */
   | "not-running"
+  /** Another operation replaced the body/instance while this update was in flight. */
+  | "superseded"
   /** The daemon predates RefreshRemoteProviders. */
   | "unsupported"
   /** The RPC failed for another reason. */
