@@ -65,7 +65,7 @@ export async function applyOwnedConfig(
   profileId: string,
   content: string,
   probe: OwnershipProbe,
-  start: (stillOwner: () => boolean) => Promise<boolean>,
+  start: (stillOwner: () => Promise<boolean>) => Promise<boolean>,
   describe: (error: unknown) => string = defaultDescribe,
 ): Promise<ApplyResult> {
   const epochBefore = probe.selectionEpoch();
@@ -97,7 +97,18 @@ export async function applyOwnedConfig(
   }
   let started: boolean;
   try {
-    started = await start(stillOwner);
+    started = await start(async () => {
+      if (!stillOwner()) return false;
+      if (before === null) return true;
+      // The start options / target-revision read can outlive the Box that was current when this
+      // operation began. A same-profile restart is a different instance even though the id and
+      // epoch are unchanged.
+      try {
+        return (await probe.startedAt()) === before;
+      } catch {
+        return false;
+      }
+    });
   } catch (error) {
     if (!stillOwner()) {
       return { status: "superseded", detail: describe(error) };
@@ -256,6 +267,106 @@ export interface LiveInstance {
 }
 
 export type ProviderBinding = "ok" | "not-active" | "not-running" | "superseded";
+
+/** The independent reads a provider refresh needs, injectable so a barrier can move them. */
+export interface ProviderReads {
+  selectedProfileId: () => string | null;
+  running: () => boolean;
+  selectionEpoch: () => number;
+  startedAt: () => Promise<string | null>;
+  revision: () => Promise<string | null>;
+}
+
+/**
+ * Reads one coherent provider-binding snapshot, with the revision query as the last slow read.
+ *
+ * Every field that a selection/Box change can move is read again after `revision()`; if any moved
+ * during the read, the result is null. Returning a snapshot is never proof that no change follows
+ * it, only that the values in it were observed in the same stable window.
+ */
+export async function stableLiveInstance(
+  reads: ProviderReads,
+  expectedRevision: string | null,
+): Promise<LiveInstance | null> {
+  const selectedBefore = reads.selectedProfileId();
+  const runningBefore = reads.running();
+  const epochBefore = reads.selectionEpoch();
+  let revision = expectedRevision;
+  if (expectedRevision !== null) {
+    revision = await reads.revision();
+  }
+  const selected = reads.selectedProfileId();
+  const running = reads.running();
+  const epoch = reads.selectionEpoch();
+  const started = await reads.startedAt();
+  const revisionAfter = expectedRevision === null ? null : await reads.revision();
+  const selectedAfter = reads.selectedProfileId();
+  const runningAfter = reads.running();
+  const epochAfter = reads.selectionEpoch();
+  if (
+    selectedBefore !== selectedAfter ||
+    runningBefore !== runningAfter ||
+    epochBefore !== epochAfter ||
+    selectedAfter !== selected ||
+    runningAfter !== running ||
+    epochAfter !== epoch ||
+    revisionAfter !== revision
+  ) {
+    return null;
+  }
+  return {
+    selectedProfileId: selectedAfter,
+    running: runningAfter,
+    startedAt: started,
+    selectionEpoch: epochAfter,
+    revision: revisionAfter,
+  };
+}
+
+export type ProviderRefreshOutcome<T> =
+  | { kind: "ok"; value: T }
+  | { kind: "not-active" | "not-running" | "superseded"; detail?: string };
+
+/**
+ * Runs the provider RPC only while the confirmed instance/epoch/revision are still bound.
+ *
+ * The callback is the actual transport call in production and a spy in tests. A moved selection
+ * during the revision query, a different live instance, or a revision mismatch returns before the
+ * callback, so the test can assert zero calls to the wrong target. A change during the callback is
+ * caught afterwards and its value is dropped (the RPC cannot be un-sent).
+ */
+export async function refreshProvidersIfStillBound<T>(
+  profileId: string,
+  expectedStartedAt: string,
+  expectedEpoch: number,
+  expectedRevision: string | null,
+  reads: ProviderReads,
+  refresh: () => Promise<T>,
+): Promise<ProviderRefreshOutcome<T>> {
+  const before = await stableLiveInstance(reads, expectedRevision);
+  if (before === null) {
+    return { kind: "superseded", detail: "the selection or revision changed while reading the instance" };
+  }
+  const binding = classifyProviderBinding(
+    profileId,
+    expectedStartedAt,
+    expectedEpoch,
+    expectedRevision,
+    before,
+  );
+  if (binding !== "ok") {
+    return { kind: binding };
+  }
+  const value = await refresh();
+  const after = await stableLiveInstance(reads, expectedRevision);
+  if (
+    after === null ||
+    classifyProviderBinding(profileId, expectedStartedAt, expectedEpoch, expectedRevision, after) !== "ok"
+  ) {
+    return { kind: "superseded", detail: "the instance changed during the provider refresh" };
+  }
+  return { kind: "ok", value };
+}
 
 /**
  * Classifies whether the provider RPC may still be attributed to the confirmed instance.

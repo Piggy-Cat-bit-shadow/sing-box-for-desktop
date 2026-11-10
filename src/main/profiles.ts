@@ -22,10 +22,10 @@ import {
 } from "../shared/remoteUpdate";
 import {
   applyOwnedConfig,
-  classifyProviderBinding,
   instanceStillOurs,
-  type LiveInstance,
+  refreshProvidersIfStillBound,
   type OwnershipProbe,
+  type ProviderReads,
 } from "../shared/remoteApply";
 import { fetchRemoteProfile } from "../shared/subscriptionFetch";
 import { SUBSCRIPTION_USER_AGENT, type SubscriptionQuotaUpdate } from "../shared/subscription";
@@ -334,7 +334,7 @@ async function encodeProfileData(id: string): Promise<Uint8Array> {
 
 async function startServiceWithContent(
   content: string,
-  stillOwner: () => boolean = () => true,
+  stillOwner: () => boolean | Promise<boolean> = () => true,
 ): Promise<boolean> {
   if (desktopService === null) {
     throw new Error("daemon is not available");
@@ -342,7 +342,7 @@ async function startServiceWithContent(
   const options = await serviceStartOptions();
   // Start options are awaited: the selection can move while they are resolved. Check again
   // immediately before the daemon call instead of applying an operation that no longer owns the UI.
-  if (!stillOwner()) {
+  if (!(await stillOwner())) {
     return false;
   }
   await desktopService.startService({
@@ -654,64 +654,42 @@ async function refreshProvidersOnLiveInstance(): Promise<RemoteProfileProviderUp
  * unknown (no start timestamp, no applied revision, an epoch change), the provider half is
  * `superseded` and no RPC is sent.
  */
+/**
+ * Reads the provider-binding facts with the slow revision query as the last source of change.
+ *
+ * The old code assembled the object field-by-field and awaited `lastActiveRevision()` last, so a
+ * switch during that await could return old-revision + new-selection. Here every field that can be
+ * changed by a switch is re-read after the revision query; if any of them moved during the read,
+ * the snapshot is discarded instead of being treated as one instant.
+ */
 async function refreshProvidersForInstance(
   profileId: string,
   expectedStartedAt: string,
   expectedEpoch: number,
   expectedRevision: string | null,
 ): Promise<RemoteProfileProviderUpdate> {
-  if (selectedProfileId() !== profileId) {
-    return { status: "not-active" };
-  }
-  if (daemonState.status !== ServiceStatus_Type.STARTED) {
-    return { status: "not-running" };
-  }
-  if (selectedEpoch() !== expectedEpoch) {
-    return { status: "superseded", detail: "selection changed before the provider refresh" };
-  }
-  const current = await currentStartedAt();
-  const beforeLive: LiveInstance = {
-    selectedProfileId: selectedProfileId(),
-    running: daemonState.status === ServiceStatus_Type.STARTED,
-    startedAt: current?.toString() ?? null,
-    selectionEpoch: selectedEpoch(),
-    revision: expectedRevision === null ? null : await lastActiveRevision(),
+  const reads: ProviderReads = {
+    selectedProfileId: () => selectedProfileId(),
+    running: () => daemonState.status === ServiceStatus_Type.STARTED,
+    selectionEpoch: () => selectedEpoch(),
+    startedAt: async () => (await currentStartedAt())?.toString() ?? null,
+    revision: () => lastActiveRevision(),
   };
-  const before = classifyProviderBinding(
+  const outcome = await refreshProvidersIfStillBound(
     profileId,
     expectedStartedAt,
     expectedEpoch,
     expectedRevision,
-    beforeLive,
+    reads,
+    refreshProvidersOnLiveInstance,
   );
-  if (before !== "ok") {
-    return {
-      status: before === "superseded" ? "superseded" : before,
-      detail:
-        before === "superseded"
-          ? "the instance or applied revision changed before the provider refresh"
-          : undefined,
-    };
+  if (outcome.kind === "ok") {
+    return outcome.value;
   }
-  const providers = await refreshProvidersOnLiveInstance();
-  const after = await currentStartedAt();
-  const afterLive: LiveInstance = {
-    selectedProfileId: selectedProfileId(),
-    running: daemonState.status === ServiceStatus_Type.STARTED,
-    startedAt: after?.toString() ?? null,
-    selectionEpoch: selectedEpoch(),
-    revision: expectedRevision === null ? null : await lastActiveRevision(),
+  return {
+    status: outcome.kind,
+    detail: outcome.detail,
   };
-  if (
-    classifyProviderBinding(profileId, expectedStartedAt, expectedEpoch, expectedRevision, afterLive) !==
-    "ok"
-  ) {
-    return {
-      status: "superseded",
-      detail: "the instance changed during the provider refresh",
-    };
-  }
-  return providers;
 }
 
 export async function selectProfile(id: string): Promise<void> {

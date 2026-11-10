@@ -5,8 +5,11 @@ import {
   applyOwnedConfig,
   classifyProviderBinding,
   instanceStillOurs,
+  refreshProvidersIfStillBound,
+  stableLiveInstance,
   type LiveInstance,
   type OwnershipProbe,
+  type ProviderReads,
 } from "./remoteApply";
 
 function deferred<T>() {
@@ -64,7 +67,7 @@ describe("applyOwnedConfig", () => {
       probe({ selectedProfileId: () => selected }),
       async (stillOwner) => {
         await options.promise;
-        return stillOwner();
+        return await stillOwner();
       },
     );
     await Promise.resolve();
@@ -218,6 +221,33 @@ describe("applyOwnedConfig", () => {
     assert.match(result.detail ?? "", /daemon rejected/);
   });
 
+  it("vetoes the start when the same profile got a new Box while options resolve", async () => {
+    const options = deferred<void>();
+    let startedAt = "100";
+    let startCalls = 0;
+    const pending = applyOwnedConfig(
+      "a",
+      "body-a",
+      probe({
+        startedAt: async () => startedAt,
+        targetRevision: async () => "rev-1",
+        appliedRevision: async () => "rev-1",
+      }),
+      async (stillOwner) => {
+        await options.promise;
+        const ok = await stillOwner();
+        if (ok) startCalls += 1;
+        return ok;
+      },
+    );
+    await Promise.resolve();
+    startedAt = "101";
+    options.resolve();
+    const result = await pending;
+    assert.equal(result.status, "superseded");
+    assert.equal(startCalls, 0);
+  });
+
   it("a start guard can veto the daemon call after options resolve", async () => {
     // This is the production shape: startServiceWithContent awaits serviceStartOptions and then
     // calls stillOwner() immediately before desktopService.startService().
@@ -228,7 +258,7 @@ describe("applyOwnedConfig", () => {
       probe(),
       async (stillOwner) => {
         owner = false;
-        return owner && stillOwner();
+        return (await stillOwner()) && owner;
       },
     );
     assert.equal(result.status, "superseded");
@@ -245,6 +275,138 @@ describe("instanceStillOurs", () => {
     assert.equal(instanceStillOurs("a", "a", true, "100", null), false);
     assert.equal(instanceStillOurs("a", "a", true, "100", "100", 1, 2), false);
     assert.equal(instanceStillOurs("a", "a", true, "100", "100", 2, 2), true);
+  });
+});
+
+describe("stableLiveInstance", () => {
+  function reads(overrides: Partial<ProviderReads> = {}): ProviderReads {
+    return {
+      selectedProfileId: () => "a",
+      running: () => true,
+      selectionEpoch: () => 2,
+      startedAt: async () => "100",
+      revision: async () => "rev-a",
+      ...overrides,
+    };
+  }
+
+  it("discards a snapshot when the selection moves inside the final revision read", async () => {
+    const revision = deferred<string | null>();
+    let selected = "a";
+    const pending = stableLiveInstance(
+      reads({
+        selectedProfileId: () => selected,
+        revision: () => revision.promise,
+      }),
+      "rev-a",
+    );
+    await Promise.resolve();
+    selected = "b";
+    revision.resolve("rev-a");
+    assert.equal(await pending, null);
+  });
+
+  it("discards A -> B -> A even though the final id is a again", async () => {
+    const revision = deferred<string | null>();
+    let epoch = 2;
+    const pending = stableLiveInstance(
+      reads({
+        selectionEpoch: () => epoch,
+        revision: () => revision.promise,
+      }),
+      "rev-a",
+    );
+    await Promise.resolve();
+    epoch = 4;
+    revision.resolve("rev-a");
+    assert.equal(await pending, null);
+  });
+
+  it("returns the stable fields when nothing moved", async () => {
+    assert.deepEqual(await stableLiveInstance(reads(), "rev-a"), {
+      selectedProfileId: "a",
+      running: true,
+      startedAt: "100",
+      selectionEpoch: 2,
+      revision: "rev-a",
+    });
+  });
+});
+
+describe("refreshProvidersIfStillBound", () => {
+  function reads(overrides: Partial<ProviderReads> = {}): ProviderReads {
+    return {
+      selectedProfileId: () => "a",
+      running: () => true,
+      selectionEpoch: () => 2,
+      startedAt: async () => "100",
+      revision: async () => "rev-a",
+      ...overrides,
+    };
+  }
+
+  it("does not send the provider RPC when the selection moves in the revision read", async () => {
+    const revision = deferred<string | null>();
+    let selected = "a";
+    let calls = 0;
+    const pending = refreshProvidersIfStillBound(
+      "a",
+      "100",
+      2,
+      "rev-a",
+      reads({
+        selectedProfileId: () => selected,
+        revision: () => revision.promise,
+      }),
+      async () => {
+        calls += 1;
+        return "provider-result";
+      },
+    );
+    await Promise.resolve();
+    selected = "b";
+    revision.resolve("rev-a");
+    const result = await pending;
+    assert.equal(result.kind, "superseded");
+    assert.equal(calls, 0);
+  });
+
+  it("sends once and returns the value while the instance stays bound", async () => {
+    let calls = 0;
+    const result = await refreshProvidersIfStillBound(
+      "a",
+      "100",
+      2,
+      "rev-a",
+      reads(),
+      async () => {
+        calls += 1;
+        return "provider-result";
+      },
+    );
+    assert.deepEqual(result, { kind: "ok", value: "provider-result" });
+    assert.equal(calls, 1);
+  });
+
+  it("drops a result if the instance changed while the RPC ran", async () => {
+    let calls = 0;
+    let startedAt = "100";
+    const result = await refreshProvidersIfStillBound(
+      "a",
+      "100",
+      2,
+      "rev-a",
+      reads({
+        startedAt: async () => startedAt,
+      }),
+      async () => {
+        calls += 1;
+        startedAt = "200";
+        return "provider-result";
+      },
+    );
+    assert.equal(result.kind, "superseded");
+    assert.equal(calls, 1);
   });
 });
 
