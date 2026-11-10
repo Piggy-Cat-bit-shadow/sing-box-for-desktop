@@ -600,12 +600,13 @@ async function lastActiveRevision(): Promise<string | null> {
  * a short bounded poll distinguishes "not written yet" from "a different revision is serving".
  */
 async function lastActiveRevisionWaiting(expected: string): Promise<string | null> {
+  let latest: string | null = null;
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const active = await lastActiveRevision();
-    if (active === expected || active !== null) return active;
+    latest = await lastActiveRevision();
+    if (latest === expected) return latest;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return await lastActiveRevision();
+  return latest;
 }
 
 /**
