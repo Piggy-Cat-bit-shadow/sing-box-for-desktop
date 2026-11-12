@@ -74,6 +74,11 @@ export class SelectionLedger {
       return { kind: "ignored-older-request", latestRequestId: current?.requestId ?? snapshot.requestId };
     }
     if (response.requestId !== snapshot.requestId) {
+      // An old daemon answers id 0: the selection WAS performed, but this attempt cannot be the
+      // one that settles the row. Drop the optimistic overlay (the groups stream is the truth)
+      // instead of leaving a pending value no answer will ever clear - the dashboard's copy of
+      // this rule does the same, and the tray must not disagree with the page about a group.
+      this.pending.delete(snapshot.groupTag);
       return { kind: "unconfirmed", reason: `the daemon answered request ${response.requestId}, not ${snapshot.requestId}` };
     }
     if (!response.appliedOutboundTag) {
