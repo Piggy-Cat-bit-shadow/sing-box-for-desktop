@@ -92,6 +92,18 @@ export interface ProviderDomainReport {
 
 /** Mirrors `daemon.ServiceChangeReport`. */
 export interface ServiceChangeReport {
+  /**
+   * The token the caller supplied for this attempt, echoed by the daemon, or absent when the
+   * caller used the token-less entry point. It is what lets a reply be matched to the apply that
+   * produced it instead of to "the last apply this window happened to send".
+   */
+  requestId?: string;
+  /**
+   * The daemon instance running after the attempt. A reload replaces the instance; naming it is
+   * the difference between "the document is running" and "the instance I switched to is running
+   * the document".
+   */
+  instanceId?: string;
   plan: ServiceChangePlan;
   status: string;
   restartRequired: boolean;
