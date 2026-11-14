@@ -52,6 +52,23 @@ describe("describeProviderRefresh", () => {
     assert.equal(result.counts?.total, 1);
   });
 
+  it("does not hide an unknown status behind pending tags", () => {
+    const result = describeProviderRefresh({
+      results: [{
+        tag: "pp",
+        status: "future-status",
+        pendingTags: ["node-a"],
+        restartRequired: true,
+        reason: "",
+      }],
+      cancelled: false,
+      boxChanged: false,
+    });
+    assert.equal(result.status, "failed");
+    assert.match(result.detail ?? "", /unknown provider status/);
+    assert.equal(result.counts?.pending, 1);
+  });
+
   it("names the reason when there is no report at all", () => {
     assert.equal(describeProviderRefresh(null, "unsupported").status, "unsupported");
     assert.equal(describeProviderRefresh(null).status, "unavailable");

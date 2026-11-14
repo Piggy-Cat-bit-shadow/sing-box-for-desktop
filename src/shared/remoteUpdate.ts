@@ -162,14 +162,17 @@ export function describeProviderRefresh(
         break;
     }
   }
+  // An unknown status is not a pending one: if it is reported alongside pending tags, calling the
+  // whole report `partial` would present a result this client cannot interpret as a warning about
+  // the parts it can. Ask for the failure first; the counts still carry the pending/restart facts.
+  if (unknown > 0) {
+    return { status: "failed", counts, detail: `${unknown} unknown provider status` };
+  }
   if (counts.pending > 0 || counts.restartRequired > 0) {
     return { status: "partial", counts };
   }
   if (counts.total === 0) {
     return { status: "none", counts };
-  }
-  if (unknown > 0) {
-    return { status: "failed", counts, detail: `${unknown} unknown provider status` };
   }
   if (counts.failed > 0) {
     return { status: "failed", counts };
