@@ -26,11 +26,27 @@ function positiveDelayTone(delay: number): UrlTestTone {
   return "bad";
 }
 
-export function urlTestResult(delay: number, time: bigint, timeoutText = "Timeout"): UrlTestResult {
+/**
+ * `urlTestTime` is the generated int64 (`bigint`). A plain `number` can still arrive from a fixture
+ * or a hand-written payload, and mixing the two throws a `TypeError` that would take down the tray
+ * rebuild. Normalise once, here, exactly like the Dashboard's `urlTestResult`.
+ */
+function completionTimeOf(time: bigint | number): bigint {
+  if (typeof time === "bigint") {
+    return time;
+  }
+  return Number.isFinite(time) ? BigInt(Math.trunc(time)) : 0n;
+}
+
+export function urlTestResult(
+  delay: number,
+  time: bigint | number,
+  timeoutText = "Timeout",
+): UrlTestResult {
   if (delay > 0) {
     return { tested: true, timeout: false, text: `${delay}ms`, tone: positiveDelayTone(delay) };
   }
-  if (delay === 0 && time > 0n) {
+  if (delay === 0 && completionTimeOf(time) > 0n) {
     return { tested: true, timeout: true, text: timeoutText, tone: "bad" };
   }
   return { tested: false, timeout: false, text: "", tone: "neutral" };
