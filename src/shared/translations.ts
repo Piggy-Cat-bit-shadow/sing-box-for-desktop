@@ -257,6 +257,12 @@ export const DESKTOP_TRANSLATIONS = {
     "fa": "آزمایش",
     "ru": "Тест",
   },
+  "Timeout": {
+    "zh-Hans": "超时",
+    "zh-Hant": "超時",
+    "fa": "اتصال منقضی شد",
+    "ru": "Тайм-аут",
+  },
   "Start At Login": {
     "zh-Hans": "开机启动",
     "zh-Hant": "開機啟動",

@@ -5,6 +5,7 @@ import { ServiceStatus_Type } from "../shared/gen/daemon/started_service_pb";
 import { SelectionLedger } from "../shared/selectionIdentity";
 import { desktopLanguageFromLocale, translateDesktop } from "../shared/translations";
 import type { DesktopMessageKey } from "../shared/translations";
+import { urlTestResult } from "../shared/urlTest";
 import { managedService, startedService } from "./daemon";
 import { preferredLocale } from "./locale";
 import { onPreferenceChanged } from "./preferences";
@@ -134,15 +135,18 @@ function groupsSubmenu(): MenuItemConstructorOptions[] {
           click: () => ignoreErrors(startedService?.uRLTest({ outboundTag: group.tag })),
         },
         { type: "separator" },
-        ...group.items.map((item) => ({
-          label: item.urlTestDelay > 0 ? `${item.tag} (${item.urlTestDelay}ms)` : item.tag,
-          type: "radio" as const,
-          checked:
-            selectionLedger.pendingSelection(group.tag) !== null
-              ? selectionLedger.pendingSelection(group.tag)?.outboundTag === item.tag
-              : item.tag === group.selected,
-          click: () => selectGroupItem(group.tag, item.tag),
-        })),
+        ...group.items.map((item) => {
+          const result = urlTestResult(item.urlTestDelay, item.urlTestTime, translate("Timeout"));
+          return {
+            label: result.tested ? `${item.tag} (${result.text})` : item.tag,
+            type: "radio" as const,
+            checked:
+              selectionLedger.pendingSelection(group.tag) !== null
+                ? selectionLedger.pendingSelection(group.tag)?.outboundTag === item.tag
+                : item.tag === group.selected,
+            click: () => selectGroupItem(group.tag, item.tag),
+          };
+        }),
       ],
     });
   }
